@@ -310,7 +310,7 @@ const CAGE_VERTEX = /* glsl */ `
 
     float halfWidth = uWidth * uWidthScale * widthMul;
     // Every filament is an arc with two loose ends, so it tapers at both.
-    halfWidth *= mix(1.0, pow(sin(clamp(t, 0.0, 1.0) * PI), 0.35), 0.85);
+    halfWidth *= mix(1.0, pow(max(sin(clamp(t, 0.0, 1.0) * PI), 0.0), 0.35), 0.85);
     if (role > 0.5 && role < 1.5) halfWidth *= mix(1.0, uColumnTaper, t);
     halfWidth *= flash * uFade;
 
@@ -376,7 +376,7 @@ const CAGE_FRAGMENT = /* glsl */ `
 
     // The loose ends fade as well as thin. A ribbon that only narrows leaves a
     // hard dot at each tip, and every filament here has two of them.
-    alpha *= pow(sin(clamp(vT, 0.0, 1.0) * PI), 0.35);
+    alpha *= pow(max(sin(clamp(vT, 0.0, 1.0) * PI), 0.0), 0.35);
     alpha *= flicker * vFlash * vDim * uFade * uPassOpacity * uOpacity;
 
     vec2 screenUV = gl_FragCoord.xy / uResolution;

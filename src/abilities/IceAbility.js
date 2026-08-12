@@ -546,7 +546,7 @@ export class IceAbility extends Ability {
     _emit.spin = 7;
     _emit.tint = null;
     _emit.time = time;
-    this.shards.emit(Math.round(3 * g.particleCount), _emit);
+    this.shards.emit(Math.round(c.breachShards * g.particleCount), _emit);
 
     // Only some spikes puff: a few hundred smoking at once buries the field in
     // haze and hides the silhouette that is the whole point.

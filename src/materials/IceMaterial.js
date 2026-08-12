@@ -1,5 +1,6 @@
 import { MeshStandardMaterial, Color, DoubleSide } from 'three';
 import { noiseGLSL } from '../shaders/lib/noise.glsl.js';
+import { disruptGLSL, disruptUniforms } from '../vfx/SceneHooks.js';
 import { frame } from '../core/FrameUniforms.js';
 import { settings } from '../config/settings.js';
 import { getColor } from '../utils/color.js';
@@ -46,6 +47,13 @@ export function createIceMaterial(environment) {
   });
 
   const uniforms = {
+    // Opt-in to `vfx/SceneHooks.js`'s published disruption region — the shared
+    // boxes, by identity, never a clone. Frost Lance is the standing effect
+    // Spellbreak is most often cast into, and before this the field simply
+    // ignored it: three of the library's modules had opted in and none of them
+    // is a crystal. Nothing is read here unless a `Hook.DISRUPT` is held, at
+    // which point the cost is one distance in the fragment stage.
+    ...disruptUniforms(),
     uTime: frame.uTime,
     uColorDeep: { value: new Color() },
     uColorIce: { value: new Color() },
@@ -125,7 +133,8 @@ export function createIceMaterial(environment) {
          varying vec3  vIceWorld;
          varying float vIceSeed;
          varying float vIceBirth;
-         ${noiseGLSL}`
+         ${noiseGLSL}
+         ${disruptGLSL}`
       )
       // Injected once the normal is resolved: with `flatShading` there is no
       // `vNormal` varying, so every view-dependent term here has to read the
@@ -195,6 +204,28 @@ export function createIceMaterial(environment) {
 
            // Thin at the edges, denser through the body and along the cracks.
            diffuseColor.a = clamp(diffuseColor.a * (0.62 + 0.5 * fres) + cracks * 0.12, 0.0, 1.0);
+
+           // Spellbreak's field (vfx/SceneHooks.js). Last, on the finished
+           // fragment: draining the body before the emissive above is summed
+           // would leave a grey crystal with a full-strength glow still coming
+           // out of its cracks, which reads as a lighting bug rather than as
+           // the spell being pulled apart. Ice is already a transparent, so the
+           // cell erosion lands on the alpha and no discard is needed — the
+           // opaque growth materials in vfx/GrowthField.js are not so lucky.
+           // Whole locals for the inout arguments, not swizzles.
+           float iceDisrupt = disruptAt(vIceWorld);
+           if (iceDisrupt > 0.0) {
+             vec3  iceAlbedo = diffuseColor.rgb;
+             float iceAlpha  = diffuseColor.a;
+             disruptShade(iceAlbedo, iceAlpha, iceDisrupt, gl_FragCoord.xy);
+             diffuseColor.rgb = iceAlbedo;
+             diffuseColor.a = iceAlpha;
+
+             vec3  iceGlow = totalEmissiveRadiance;
+             float iceGlowKeep = 1.0;
+             disruptShade(iceGlow, iceGlowKeep, iceDisrupt, gl_FragCoord.xy);
+             totalEmissiveRadiance = iceGlow * iceGlowKeep;
+           }
          }`
       );
   });
