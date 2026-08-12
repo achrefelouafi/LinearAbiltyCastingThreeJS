@@ -30,6 +30,13 @@
     <!-- Heads-up display (populated by src/ui/HUD.js) -->
     <div id="hud" class="hud" aria-live="polite"></div>
 
+    <!--
+      Spellbook overlay (populated by src/ui/Spellbook.js). A sibling of #hud
+      rather than a child: it sits *below* the HUD in the stack so the loadout
+      bar stays lit and droppable over the top of it while the book is open.
+    -->
+    <div id="spellbook" class="spellbook"></div>
+
     <script type="module" src="./src/main.js"></script>
   </body>
 </html>

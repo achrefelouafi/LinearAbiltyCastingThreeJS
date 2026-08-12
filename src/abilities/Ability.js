@@ -77,6 +77,18 @@ export class Ability {
     /** Transient additive light punch (impacts). Decays on its own. */
     this.lightBoost = 0;
 
+    /**
+     * Handles this cast has borrowed from a **global** pool — a scene hook
+     * (`vfx/SceneHooks.js`), a time region (`vfx/TimeControl.js`), anything
+     * else whose `acquire()` takes a slice of the world away from everybody
+     * else. See `borrow()`.
+     *
+     * Allocated once, per instance, at construction; `destroy()` empties it in
+     * place. An ability is pooled, so this array is created a handful of times
+     * for the life of the app and never during a cast — I3 holds.
+     */
+    this.borrowed = [];
+
     this.createShaders();
     this.createParticles();
   }
@@ -263,11 +275,55 @@ export class Ability {
     this.lightBoost = Math.max(0, this.lightBoost - this.lightBoost * 4.5 * dt - 0.5 * dt);
   }
 
+  /**
+   * Register a borrowed global handle so `destroy()` gives it back.
+   *
+   * ```js
+   * this.region = this.borrow(timeField.acquire());              // may be null
+   * this.grade  = this.borrow(sceneHooks.acquire(Hook.GRADE, this));
+   * ```
+   *
+   * This exists because a cast can end in four different ways and only one of
+   * them is the ability's idea. It finishes normally; the player presses **C**
+   * and `AbilityManager#clear()` destroys it mid-flight; a fifth cast pushes it
+   * off the front of the concurrency cap; the app tears down. `onDestroy()` is
+   * called on all four, so an ability that releases there is already correct —
+   * and every one of the fifty is. The net is here for the same reason
+   * `ctx.lights.release(this.light)` is on the line below it rather than in
+   * fifty `onDestroy()` bodies: a light that leaks costs the next cast its
+   * light, but a **scene hook** that leaks holds the sun, the grade or the
+   * floor's material wrong for the rest of the session, and a leaked **time
+   * region** stops a sphere of the world permanently. Those are not failures
+   * anybody would trace back to the ability that caused them.
+   *
+   * `SceneHooks` does carry an eight-frame lease sweep as a second net, but it
+   * recovers with a console warning several frames late; this recovers exactly,
+   * on the frame, silently. `TimeField` has no sweep at all — it cannot have
+   * one, because nothing ticks it — so for time regions this *is* the net.
+   *
+   * Nothing is imported to make it work: every such handle knows its own pool
+   * (`token.hooks`, `region._field`) and every `release()` in the project is
+   * idempotent, so releasing here and again in `onDestroy()` is harmless and
+   * the order does not matter.
+   *
+   * @template T
+   * @param {T} handle anything with a `release()`; `null` passes through
+   * @returns {T} the same handle, so this wraps the acquisition inline
+   */
+  borrow(handle) {
+    if (handle) this.borrowed.push(handle);
+    return handle;
+  }
+
   /** Return to the pool. Must leave the instance reusable. */
   destroy() {
     this.onDestroy();
     this.ctx.lights.release(this.light);
     this.light = null;
+    // Backwards: a handle released inside onDestroy() is already inert, and
+    // popping from the end keeps this allocation-free.
+    for (let i = this.borrowed.length - 1; i >= 0; i--) this.borrowed[i]?.release?.();
+    this.borrowed.length = 0;
     this.group.visible = false;
     this.phase = AbilityPhase.IDLE;
   }

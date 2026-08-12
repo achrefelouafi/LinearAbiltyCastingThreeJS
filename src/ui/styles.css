@@ -13,10 +13,22 @@
   --ui-radius: 14px;
   --ui-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
   --ui-font: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  /* Small caps used for every tag, key and section label in the HUD. */
+  --ui-caps: 0.16em;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/*
+ * `hidden` is how the HUD and the spellbook fold things away, and a flex or
+ * grid `display` in a class rule beats the attribute's default `display: none`
+ * every time. One `!important` here is cheaper than remembering that at each
+ * of the dozen places something is hidden.
+ */
+[hidden] {
+  display: none !important;
 }
 
 html,
@@ -143,25 +155,62 @@ body {
  * HUD
  * ------------------------------------------------------------------ */
 
+/*
+ * The HUD sits *above* the spellbook (z 25) on purpose: the loadout bar has to
+ * stay lit and droppable while the book is open, and a child cannot escape its
+ * parent's stacking context, so the whole HUD goes over the top and the panels
+ * that would fight the book are faded out instead (`.is-book-open`).
+ */
 .hud {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  z-index: 20;
+  z-index: 30;
   font-size: 13px;
+}
+
+.hud.is-book-open .hud__title,
+.hud.is-book-open .hud__stats,
+.hud.is-book-open .hud__help {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hud__title,
+.hud__stats {
+  transition: opacity 0.25s ease;
 }
 
 /* ------------------------------------------------------------------ *
  * Ability bar
  * ------------------------------------------------------------------ */
 
+/*
+ * Full width and centred, rather than `left: 50%` + `translateX(-50%)`.
+ *
+ * The old trick shrink-wraps: an absolutely positioned box with `left: 50%`
+ * gets exactly half the viewport to lay out in, which was invisible while the
+ * bar could not wrap and became a bar that folded after six cards the moment
+ * it could. Full-bleed with `justify-content: center` gives the row the whole
+ * window, so eight slots and the transient card stay on one line.
+ *
+ * The container is therefore transparent to the pointer — it spans the screen
+ * — and the cards opt back in. Events still bubble to the delegated listeners.
+ */
 .hud__abilities {
   position: absolute;
-  left: 50%;
+  left: 0;
+  right: 0;
   bottom: 26px;
-  transform: translateX(-50%);
   display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 10px;
+  padding: 0 22px;
+  pointer-events: none;
+}
+
+.hud__abilities > .ability-card {
   pointer-events: auto;
 }
 
@@ -278,6 +327,109 @@ body {
   color: var(--ui-text-dim);
 }
 
+/*
+ * The slot's name is a button: clicking it opens that ability in the editor
+ * rather than arming it. It has to look like the label it replaced, so every
+ * inherited button style is unwound.
+ */
+button.ability-card__label {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+button.ability-card__label:hover {
+  color: var(--accent, var(--ui-accent));
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 255, 255, 0.35);
+  text-underline-offset: 3px;
+}
+
+/* An empty slot: an invitation, drawn as an outline rather than a panel. */
+.ability-card.is-empty {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(10, 14, 20, 0.32);
+  box-shadow: none;
+  color: var(--ui-text-dim);
+}
+
+.ability-card.is-empty:hover {
+  border-color: rgba(127, 214, 255, 0.5);
+  background: rgba(16, 24, 34, 0.55);
+  color: var(--ui-text);
+}
+
+.ability-card.is-empty .ability-card__label {
+  opacity: 0.55;
+  font-weight: 500;
+}
+
+.ability-card__plus {
+  display: block;
+  width: 34px;
+  height: 34px;
+  margin: 1px auto 0;
+  font-size: 20px;
+  font-weight: 300;
+  line-height: 34px;
+  opacity: 0.5;
+}
+
+/*
+ * The transient slot. An ability chosen straight from the spellbook holds no
+ * key, but it still needs somewhere to pulse and sweep, so it borrows a ninth
+ * card marked out with a dotted key box.
+ */
+.ability-card--loose {
+  border-color: rgba(255, 255, 255, 0.2);
+  border-left-style: dotted;
+}
+
+.ability-card--loose .ability-card__key {
+  opacity: 0.5;
+}
+
+/* Drag and drop: the source dims, the target lights up. */
+.ability-card.is-dragging {
+  opacity: 0.4;
+}
+
+.ability-card.is-drop {
+  border-color: var(--ui-accent);
+  background: rgba(24, 38, 52, 0.9);
+  box-shadow: 0 0 0 1px var(--ui-accent) inset, 0 0 26px -6px var(--ui-accent);
+  transform: translateY(-3px);
+}
+
+/* While the book is open, every slot advertises itself as a drop target. */
+.hud.is-book-open .ability-card {
+  border-color: rgba(127, 214, 255, 0.28);
+}
+
+.hud.is-book-open .ability-card.is-empty {
+  animation: slot-invite 2.4s ease-in-out infinite;
+}
+
+@keyframes slot-invite {
+  0%,
+  100% {
+    border-color: rgba(127, 214, 255, 0.28);
+  }
+  50% {
+    border-color: rgba(127, 214, 255, 0.62);
+  }
+}
+
 .hud__panel {
   position: absolute;
   padding: 12px 14px;
@@ -290,10 +442,22 @@ body {
   line-height: 1.65;
 }
 
+/*
+ * The controls panel moved from bottom-left to under the title.
+ *
+ * It sat above the ability bar for six slots and 636 pixels of bar. Eight
+ * slots plus the transient card is 944, and a centred bar that wide runs
+ * straight through the bottom-left corner — the panel and the first two slots
+ * were drawing on top of each other. Stacking it under the title keeps the
+ * left column as one block, leaves the whole bottom edge to the bar, and costs
+ * nothing: the corner it vacated is the emptiest part of the stage.
+ */
 .hud__help {
   left: 22px;
-  bottom: 26px;
-  max-width: 260px;
+  top: 126px;
+  /* Wider than it was: the key list is generated two-up now and eight ability
+   * names elided at 260px read as eight identical stubs. */
+  width: 296px;
   color: var(--ui-text-dim);
   transition: opacity 0.3s ease;
 }
@@ -352,6 +516,51 @@ body {
   text-transform: none;
 }
 
+/* "6 of 100 spells · Tab spellbook" — the roster's size, and the way in. */
+.hud__roster {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ui-border);
+  color: var(--ui-text-dim);
+}
+
+.hud__roster b {
+  color: var(--ui-accent);
+  font-weight: 600;
+}
+
+.hud__roster kbd {
+  margin-left: 6px;
+}
+
+/*
+ * The generated key list. Two columns of `letter digit — name`, which is the
+ * densest shape that still reads: eight rows of prose ran the help panel off
+ * the bottom of a laptop screen.
+ */
+.hud__keys {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 10px;
+  margin-bottom: 4px;
+}
+
+.hud__key {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.hud__key i {
+  overflow: hidden;
+  color: var(--ui-text);
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .hud__toast {
   position: absolute;
   left: 50%;
@@ -407,10 +616,482 @@ body {
 }
 
 /* ------------------------------------------------------------------ *
+ * Spellbook
+ *
+ * The full-screen roster browser. It sits at z 25, under the HUD (z 30), so
+ * the loadout bar stays lit above it and a card can be dragged onto a slot —
+ * which is why the panel stops 148px short of the bottom instead of filling
+ * the viewport.
+ * ------------------------------------------------------------------ */
+
+.spellbook {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  visibility: hidden;
+  pointer-events: none;
+  font-size: 13px;
+}
+
+.spellbook.is-open {
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.book__scrim {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(130% 120% at 50% 18%, rgba(14, 22, 32, 0.68), rgba(3, 5, 8, 0.9));
+  backdrop-filter: blur(6px) saturate(0.8);
+  -webkit-backdrop-filter: blur(6px) saturate(0.8);
+  opacity: 0;
+  transition: opacity 0.28s ease;
+}
+
+.spellbook.is-open .book__scrim {
+  opacity: 1;
+}
+
+/* The book itself: one panel in the HUD's language, at a larger scale. */
+.book {
+  position: absolute;
+  top: max(20px, 3vh);
+  bottom: 148px;
+  left: 50%;
+  width: min(1420px, calc(100vw - 44px));
+  transform: translate(-50%, 14px) scale(0.99);
+  display: flex;
+  flex-direction: column;
+  border-radius: 18px;
+  border: 1px solid var(--ui-border);
+  background: linear-gradient(180deg, rgba(13, 18, 26, 0.94), rgba(8, 11, 16, 0.94));
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  opacity: 0;
+  overflow: hidden;
+  transition: opacity 0.24s ease, transform 0.24s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+.spellbook.is-open .book {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+}
+
+/* While a card is being dragged the book gets out of the way of the bar. */
+.spellbook.is-dragging .book {
+  opacity: 0.55;
+}
+
+/* ---- header ---- */
+
+.book__head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 15px 20px 13px;
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.book__brand {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+}
+
+.book__count {
+  margin-left: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--ui-border);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--ui-text-dim);
+}
+
+.book__count b {
+  color: var(--ui-accent);
+}
+
+.book__search {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  max-width: 520px;
+  height: 34px;
+  padding: 0 12px 0 34px;
+  border-radius: 10px;
+  border: 1px solid var(--ui-border);
+  background: rgba(255, 255, 255, 0.05);
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.book__search:focus-within {
+  border-color: rgba(127, 214, 255, 0.55);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.book__search-icon {
+  position: absolute;
+  left: 11px;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: var(--ui-text-dim);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.book__search input {
+  width: 100%;
+  border: 0;
+  background: none;
+  color: var(--ui-text);
+  font-family: var(--ui-font);
+  font-size: 13px;
+  outline: none;
+}
+
+.book__search input::placeholder {
+  color: rgba(197, 214, 232, 0.42);
+}
+
+/* Bind mode: the book was opened *from* a slot, so a plain click binds. */
+.book__mode {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(127, 214, 255, 0.45);
+  background: rgba(127, 214, 255, 0.12);
+  color: var(--ui-accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: var(--ui-caps);
+  text-transform: uppercase;
+}
+
+/* ---- school rail ---- */
+
+/*
+ * Fifteen chips do not fit across the header, so the rail wraps to two rows.
+ * It used to scroll horizontally with the scrollbar hidden, which at nine
+ * schools never scrolled and at fifteen put the last school off the right-hand
+ * edge with nothing on screen to say it was there. Wrapping costs ~26px of
+ * body height and keeps the whole roster's shape visible at once, which is
+ * half of what the rail is for.
+ */
+.book__rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.book-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--ui-border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--ui-text-dim);
+  font-family: var(--ui-font);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: var(--ui-caps);
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background 0.16s ease, opacity 0.16s ease;
+}
+
+.book-chip i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px -1px var(--accent);
+}
+
+.book-chip b {
+  color: rgba(255, 255, 255, 0.35);
+  font-weight: 600;
+}
+
+.book-chip:hover {
+  color: var(--ui-text);
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* The section currently under the top of the body. Deliberately the hover
+ * treatment plus a wash of the school's own colour rather than a new idea:
+ * the rail is a position indicator now as well as a menu, and a second visual
+ * language in a 22px chip would just be noise. */
+.book-chip.is-current {
+  color: var(--ui-text);
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, rgba(255, 255, 255, 0.03));
+}
+
+.book-chip.is-current b {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+/* A school the filter has emptied stays in place, greyed — the rail is also
+ * the roster's shape, and a rail that reflows on every keystroke is a rail
+ * nobody can aim at. */
+.book-chip.is-dim {
+  opacity: 0.28;
+}
+
+/* ---- body ---- */
+
+.book__body {
+  flex: 1 1 auto;
+  padding: 0 20px 22px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.book__body::-webkit-scrollbar {
+  width: 10px;
+}
+
+.book__body::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16) padding-box;
+}
+
+.book-school {
+  padding-bottom: 6px;
+}
+
+/*
+ * Pinned school headers. The pad-and-negative-margin dance is what lets the
+ * sticky bar cover the full gutter width while the section itself keeps the
+ * body's padding — without it the cards slide out from under the header at
+ * the edges, which looks like a rendering bug.
+ */
+.book-school__head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 -20px;
+  padding: 14px 20px 9px;
+  background: linear-gradient(180deg, rgba(10, 14, 20, 0.98) 62%, rgba(10, 14, 20, 0));
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ui-text);
+}
+
+.book-school__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px -1px var(--accent);
+}
+
+.book-school__head b {
+  color: rgba(255, 255, 255, 0.3);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.book-school__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: 8px;
+}
+
+/* ---- a card ---- */
+
+.spell {
+  position: relative;
+  display: grid;
+  grid-template-columns: 38px 1fr auto;
+  align-items: start;
+  gap: 11px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.022);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.spell:hover,
+.spell.is-cursor {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: rgba(255, 255, 255, 0.06);
+  transform: translateY(-1px);
+}
+
+/* The keyboard cursor has to be legible without a pointer anywhere near it. */
+.spell.is-cursor {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent) inset;
+}
+
+/* The ability the app currently has in the slot. */
+.spell.is-selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, rgba(255, 255, 255, 0.03));
+  box-shadow: 0 0 22px -10px var(--accent);
+}
+
+.spell__glyph {
+  display: block;
+  color: var(--accent);
+}
+
+.spell__glyph .glyph-svg {
+  display: block;
+  width: 34px;
+  height: 34px;
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--accent) 70%, transparent));
+}
+
+.spell__text {
+  display: block;
+  min-width: 0;
+}
+
+.spell__name {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ui-text);
+}
+
+.spell__blurb {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ui-text-dim);
+}
+
+/* ARROW / CIRCLE — how the thing is aimed, in four characters. */
+.spell__shape {
+  align-self: start;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(197, 214, 232, 0.5);
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  white-space: nowrap;
+}
+
+/* The key it answers to, if it is on the bar. */
+.spell__key {
+  position: absolute;
+  right: 10px;
+  bottom: 9px;
+  min-width: 17px;
+  padding: 1px 4px;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+.book__empty {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--ui-text-dim);
+}
+
+/* ---- footer ---- */
+
+.book__foot {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 20px;
+  border-top: 1px solid var(--ui-border);
+  color: var(--ui-text-dim);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.book__foot kbd {
+  display: inline-block;
+  min-width: 17px;
+  padding: 1px 5px;
+  margin-right: 3px;
+  border-radius: 5px;
+  border: 1px solid var(--ui-border);
+  background: rgba(255, 255, 255, 0.07);
+  font: 10px/1.5 var(--ui-font);
+  color: var(--ui-text);
+  text-align: center;
+}
+
+.book__reset {
+  margin-left: auto;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--ui-border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ui-text-dim);
+  font-family: var(--ui-font);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.book__reset:hover {
+  border-color: rgba(255, 122, 106, 0.5);
+  color: #ff9c8f;
+}
+
+/* ------------------------------------------------------------------ *
  * lil-gui theming
  * ------------------------------------------------------------------ */
 
-.lil-gui.root {
+/*
+ * The panel itself.
+ *
+ * Selected as `body > .lil-gui`, not `.lil-gui.root`. lil-gui prefixed its
+ * class names at 0.20 — the root element is `.lil-gui.lil-root` now — so this
+ * whole block, and the title rule under it, silently stopped matching and had
+ * been dead ever since. Nobody noticed the theming, because lil-gui's own
+ * default happens to be a dark panel too. What was noticed, eventually, is
+ * `max-height`: with the authored one dead the panel fell back to the library's
+ * `100%`, which against `top: 16px` puts the last sixteen pixels of a
+ * fifteen-school panel below the fold — and at fifteen schools with a hundred
+ * abilities the panel is always at its limit. The child combinator picks out
+ * the one GUI autoplaced on the page and is immune to the next rename; it is
+ * the same idiom the spellbook-fade rule below already uses, and for the same
+ * reason.
+ */
+body > .lil-gui {
   --background-color: rgba(12, 16, 22, 0.9);
   --widget-color: rgba(255, 255, 255, 0.1);
   --focus-color: rgba(127, 214, 255, 0.35);
@@ -427,10 +1108,26 @@ body {
   border-radius: 12px;
   overflow: hidden;
   box-shadow: var(--ui-shadow);
+}
+
+/*
+ * The height cap needs two classes to land.
+ *
+ * lil-gui ships `.lil-gui.lil-auto-place { max-height: 100% }`, which is
+ * specificity (0,2,0) and beats `body > .lil-gui` at (0,1,1). `100%` of the
+ * *containing block* is the viewport, so with `top: 16px` the panel's last
+ * sixteen pixels sit below the fold — invisible until the panel is tall enough
+ * to hit the cap, which at fifteen schools it always is. Both spellings, for
+ * the same reason as the title rule.
+ */
+body > .lil-gui.lil-auto-place,
+body > .lil-gui.autoPlace {
   max-height: calc(100vh - 32px);
 }
 
-.lil-gui.root > .title {
+/* Both spellings: 0.21 emits `lil-title`, older builds emitted `title`. */
+body > .lil-gui > .lil-title,
+body > .lil-gui > .title {
   letter-spacing: 0.16em;
   text-transform: uppercase;
   font-weight: 600;
@@ -441,6 +1138,133 @@ body {
   right: 16px;
 }
 
+/* Out of the way while the spellbook is being read. */
+body > .lil-gui {
+  transition: opacity 0.24s ease;
+}
+
+body.is-book-open > .lil-gui {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------------ *
+ * The editor's header strip — search + jump
+ *
+ * Not a lil-gui controller: a strip of our own, wedged between the title bar
+ * and the scrolling children so it is the one row in a panel of a thousand
+ * controls that never scrolls away. Styled against the HUD's own variables
+ * rather than lil-gui's, so it matches the rest of the shell whichever
+ * version of the library is underneath.
+ *
+ * The widget rules are qualified with `.lil-gui` for specificity, not for
+ * scope: our strip lives inside the panel, and lil-gui ships
+ * `.lil-gui input, .lil-gui button { width: 100% }` — one class and one type,
+ * which beats a bare class every time. Unqualified, the search field collapses
+ * to nothing and the jump button eats the row.
+ * ------------------------------------------------------------------ */
+
+.editor-tools {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.28);
+  border-bottom: 1px solid var(--ui-border);
+}
+
+/* Collapsing the panel by its title takes the strip with it. */
+.lil-gui.lil-closed > .editor-tools,
+.lil-gui.closed > .editor-tools {
+  display: none;
+}
+
+.lil-gui .editor-tools__search {
+  flex: 1 1 auto;
+  /* lil-gui's `input { width: 100% }` would size the field to the whole strip
+     and push the jump button out of the panel. */
+  width: auto;
+  min-width: 0;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ui-text);
+  font-family: var(--ui-font);
+  font-size: 11px;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.lil-gui .editor-tools__search::placeholder {
+  color: var(--ui-text-dim);
+}
+
+.lil-gui .editor-tools__search:focus {
+  border-color: rgba(127, 214, 255, 0.55);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* The native macOS clear affordance sits badly on a 22px dark field. */
+.lil-gui .editor-tools__search::-webkit-search-cancel-button {
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.lil-gui .editor-tools__jump {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--ui-accent);
+  font-family: var(--ui-font);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.lil-gui .editor-tools__jump:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.lil-gui .editor-tools__jump:active {
+  background: rgba(127, 214, 255, 0.25);
+}
+
+/* ------------------------------------------------------------------ *
+ * Narrow windows
+ *
+ * The bar is nine cards wide now, not six, so it is shrunk in two steps
+ * before it is allowed to wrap — a wrapped bar is two rows tall and the
+ * spellbook has to be told to stop above it, which is the `bottom` bump in
+ * the last block.
+ * ------------------------------------------------------------------ */
+
+@media (max-width: 1180px) {
+  .ability-card {
+    width: 84px;
+  }
+}
+
+@media (max-width: 940px) {
+  .ability-card {
+    width: 72px;
+    padding: 10px 6px 8px;
+  }
+  .ability-card__label {
+    font-size: 10px;
+    letter-spacing: 0.06em;
+  }
+  .book {
+    bottom: 130px;
+  }
+}
+
 @media (max-width: 760px) {
   .hud__help,
   .hud__stats {
@@ -448,5 +1272,21 @@ body {
   }
   .ability-card {
     width: 78px;
+  }
+  .book {
+    top: 12px;
+    bottom: 250px;
+    width: calc(100vw - 20px);
+  }
+  .book__head {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .book-school__grid {
+    grid-template-columns: 1fr;
+  }
+  /* Keep only "Esc close" and the reset button; the rest is mouse advice. */
+  .book__foot span:not(:last-of-type) {
+    display: none;
   }
 }

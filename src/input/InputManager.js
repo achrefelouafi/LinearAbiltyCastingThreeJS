@@ -9,20 +9,97 @@ import { EventEmitter } from '../utils/EventEmitter.js';
  *   `pointer:confirm` (ndc)       — left click on the viewport
  *   `action` (name, slot)         — everything else, already named by intent.
  *                                   `ability` carries the 0-based slot index,
- *                                   which App maps through `ELEMENTS`.
+ *                                   which App maps through the loadout.
  *
  * Pointer events that begin on top of DOM UI (the editor, the HUD) are ignored
  * so dragging a slider never fires the ability.
+ *
+ * ## Why the switch went away
+ *
+ * The keyboard used to be a `switch` with one hard-coded `case` per ability
+ * letter. That is fine while the letters *are* the roster; it stops being fine
+ * the moment eight slots are rebindable over fifty abilities, because the truth
+ * about which key means which slot then lives in `Loadout` and a second copy in
+ * a switch statement is a second copy that will be wrong.
+ *
+ * So the letters arrive as data — `setSlotKeys(['Q','E',...])` — and are folded
+ * into one lookup table alongside the fixed actions. Rebinding is a call, not
+ * an edit. Two rules make the table safe to build from user data:
+ *
+ *  - **Reserved keys win.** `C` clears the scene and has since the first build;
+ *    a loadout that tries to claim it loses, loudly, in the console. Muscle
+ *    memory that suddenly casts a spell is worse than a slot that will not bind.
+ *  - **Digits mirror letters.** Slot `i` also answers to digit `i + 1`, which is
+ *    generated here rather than being eight more rows to keep in step.
  */
+
+/**
+ * Keys that are not slots and never will be.
+ *
+ * `Tab` is the spellbook, which costs the page its focus-traversal key; that is
+ * a fair trade in a full-screen canvas demo with one text field in it, and `B`
+ * is kept as the alternative for anyone who disagrees.
+ */
+const RESERVED_KEYS = Object.freeze({
+  Escape: 'cancel',
+  KeyH: 'toggleHelp',
+  KeyG: 'toggleEditor',
+  KeyC: 'clear',
+  KeyP: 'togglePause',
+  Tab: 'toggleSpellbook',
+  KeyB: 'toggleSpellbook'
+});
+
+/** Keys whose browser default would fight the app. */
+const SWALLOW_DEFAULT = new Set(['Tab']);
+
 export class InputManager extends EventEmitter {
-  constructor(domElement) {
+  /**
+   * @param {HTMLElement} domElement
+   * @param {object} [options]
+   * @param {string[]} [options.slotKeys] one letter per loadout slot, in order
+   */
+  constructor(domElement, options = {}) {
     super();
     this.dom = domElement;
     this.pointer = new Vector2(); // NDC
     this.keys = new Set();
     this.enabled = true;
 
+    /** `KeyboardEvent.code` → slot index. Rebuilt by `setSlotKeys`. */
+    this._slotByCode = new Map();
+    this.setSlotKeys(options.slotKeys ?? []);
+
     this._bind();
+  }
+
+  /**
+   * Point the slot keys at a new letter list.
+   *
+   * Cheap and idempotent: call it every time the loadout changes and forget
+   * about it. A letter that collides with a reserved key is dropped and its
+   * slot becomes digit-only.
+   *
+   * @param {string[]} keys one letter per slot, in slot order
+   */
+  setSlotKeys(keys) {
+    this._slotByCode.clear();
+    for (let slot = 0; slot < keys.length; slot++) {
+      const letter = String(keys[slot] ?? '').toUpperCase();
+      if (letter.length === 1) {
+        const code = `Key${letter}`;
+        if (code in RESERVED_KEYS) {
+          console.warn(
+            `[InputManager] slot ${slot + 1} wants ${letter}, which is reserved for ` +
+              `"${RESERVED_KEYS[code]}" — the slot keeps its digit only.`
+          );
+        } else {
+          this._slotByCode.set(code, slot);
+        }
+      }
+      // Digits 1..9 mirror the letters. Ten slots would need `Digit0`; eight do not.
+      if (slot < 9) this._slotByCode.set(`Digit${slot + 1}`, slot);
+    }
   }
 
   _bind() {
@@ -69,50 +146,16 @@ export class InputManager extends EventEmitter {
 
     this.keys.add(event.code);
 
-    switch (event.code) {
-      // Ability slots. Keep these in step with `ELEMENT_META[...].key`.
-      case 'KeyQ':
-      case 'Digit1':
-        this.emit('action', 'ability', 0);
-        break;
-      case 'KeyE':
-      case 'Digit2':
-        this.emit('action', 'ability', 1);
-        break;
-      case 'KeyR':
-      case 'Digit3':
-        this.emit('action', 'ability', 2);
-        break;
-      case 'KeyF':
-      case 'Digit4':
-        this.emit('action', 'ability', 3);
-        break;
-      case 'KeyV':
-      case 'Digit5':
-        this.emit('action', 'ability', 4);
-        break;
-      case 'KeyX':
-      case 'Digit6':
-        this.emit('action', 'ability', 5);
-        break;
-      case 'Escape':
-        this.emit('action', 'cancel');
-        break;
-      case 'KeyH':
-        this.emit('action', 'toggleHelp');
-        break;
-      case 'KeyG':
-        this.emit('action', 'toggleEditor');
-        break;
-      case 'KeyC':
-        this.emit('action', 'clear');
-        break;
-      case 'KeyP':
-        this.emit('action', 'togglePause');
-        break;
-      default:
-        break;
+    // Reserved first, so a bad rebind can never shadow "clear" or "pause".
+    const action = RESERVED_KEYS[event.code];
+    if (action) {
+      if (SWALLOW_DEFAULT.has(event.code)) event.preventDefault();
+      this.emit('action', action);
+      return;
     }
+
+    const slot = this._slotByCode.get(event.code);
+    if (slot !== undefined) this.emit('action', 'ability', slot);
   };
 
   _onKeyUp = (event) => {

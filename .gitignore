@@ -137,3 +137,6 @@ dist
 
 # Local VFX capture scratch (dev tooling)
 .captures/
+
+# Agent debug tooling and dev logs (not part of the project)
+.scratch/

@@ -26,11 +26,15 @@ import { ScreenFlash } from '../effects/ScreenFlash.js';
 
 import { AbilityManager } from '../abilities/AbilityManager.js';
 import { PostProcessing } from '../postprocessing/PostProcessing.js';
+import { sceneHooks } from '../vfx/SceneHooks.js';
 
 import { HUD, LoadingScreen } from '../ui/HUD.js';
 import { Editor } from '../ui/Editor.js';
+import { Loadout } from '../ui/Loadout.js';
+import { Spellbook } from '../ui/Spellbook.js';
 
 import { settings, ELEMENTS } from '../config/settings.js';
+import { getAbility } from '../abilities/registry.js';
 
 const HDR_URL = './hdri/spruit_sunrise.hdr';
 
@@ -102,24 +106,51 @@ export class App {
     this.character = new CharacterController(this.environment);
     this.scene.add(this.character.root);
 
+    /* ---- the loadout: eight slots over fifty abilities ---- */
+    // Built before the input manager and the HUD because both are views of it.
+    this.loadout = new Loadout();
+
     /* ---- input & targeting ---- */
-    this.input = new InputManager(canvas);
+    this.input = new InputManager(canvas, { slotKeys: this.loadout.keys });
     this.aim = new AimController(this.camera);
     this.scene.add(this.aim.object3D);
 
     /* ---- post ---- */
     this.post = new PostProcessing(this.renderer, this.scene, this.camera);
 
+    /* ---- the world an ability is allowed to borrow ---- */
+    // `vfx/SceneHooks.js` is the only module that reaches out of an ability's
+    // group and edits the scene itself. It is handed the four things it may
+    // touch and nothing else; leaving any of them out disables exactly one
+    // hook. Done here, before the first frame, so the floor's ageing patch is
+    // composed into the material before `compileAsync()` sees it.
+    sceneHooks.install({
+      scene: this.scene,
+      environment: this.environment,
+      ground: this.ground,
+      grade: this.post.gradePass.uniforms,
+      renderer: this.renderer
+    });
+
     /* ---- UI ---- */
     this.loading = new LoadingScreen();
-    this.hud = new HUD(document.getElementById('hud'));
+    this.hud = new HUD(document.getElementById('hud'), this.loadout);
     this.editor = new Editor({
       onClear: () => this.clearEffects(),
       onToast: (message) => this.hud.showToast(message)
     });
+    this.spellbook = new Spellbook(document.getElementById('spellbook'), {
+      loadout: this.loadout,
+      onSelect: (id) => this.armAbility(id),
+      onBind: (slot, id) => this.bindSlot(slot, id),
+      onToast: (message) => this.hud.showToast(message),
+      onToggle: (open) => this.hud.setBookOpen(open)
+    });
 
     this._bindEvents();
-    this.selectAbility(ELEMENTS[0], { silent: true });
+    // Whatever is in slot one, or — on a loadout somebody has emptied — the
+    // first thing in the registry, so the app never boots with nothing armed.
+    this.selectAbility(this.loadout.idAt(0) ?? ELEMENTS[0], { silent: true });
 
     this._focusPoint = new Vector3();
   }
@@ -149,18 +180,36 @@ export class App {
     this.aim.on('reject', () => this.hud.showToast('Too close — aim further out'));
 
     this.hud.onAbility = (element) => this.armAbility(element);
+    this.hud.onInspect = (element) => this.inspectAbility(element);
+    this.hud.onEmptySlot = (slot) => this.spellbook.open({ slot });
+    this.hud.onBind = (slot, element) => this.bindSlot(slot, element);
+
+    // The key table is a view of the loadout, so it is rebuilt with it. Today
+    // the letters are fixed and this is a no-op; the day a slot's letter is
+    // editable it is the only wiring that needs to already exist.
+    this.loadout.on('change', () => this.input.setSlotKeys(this.loadout.keys));
   }
 
   _handleAction(action, slot) {
     switch (action) {
       case 'ability': {
-        const element = ELEMENTS[slot] ?? this.element;
+        const element = this.loadout.idAt(slot);
+        if (!element) {
+          // An empty slot is an invitation, not an error: open the book with
+          // that slot as the target so the key the player just pressed is the
+          // key the next click binds.
+          this.spellbook.open({ slot });
+          break;
+        }
         // Pressing the *same* key again puts an armed cast away, as it does in a
         // MOBA; pressing a different one swaps the slot without disarming.
         if (this.aim.isArmed && element === this.element) this.aim.cancel();
         else this.armAbility(element);
         break;
       }
+      case 'toggleSpellbook':
+        this.spellbook.toggle();
+        break;
       case 'cancel':
         this.aim.cancel();
         break;
@@ -187,12 +236,71 @@ export class App {
   /**
    * Put an ability in the slot. The aim indicator and the HUD both follow,
    * because `range` and `minRange` are the ability's, not the app's.
+   *
+   * Selecting is also where the ability's class is **warmed**: its module is
+   * imported and one pooled instance is built, off the frame loop, behind the
+   * arrow sweeping out. Ability classes are lazy so that fifty of them are not
+   * constructed at boot, and this is the moment that buys back — selection
+   * always precedes the click by at least a frame, usually by seconds. The
+   * promise is deliberately dropped; a cast that somehow beats the import is
+   * handled by `AbilityManager#cast` returning null.
+   *
+   * The editor follows the slot too. With fifty ability folders in the panel
+   * the one worth looking at is almost always the one about to be cast, so
+   * selecting opens that folder and scrolls it up — except on the silent
+   * boot-time selection, where the panel must still come up fully collapsed.
    */
   selectAbility(element, options = {}) {
-    if (!ELEMENTS.includes(element)) return;
+    if (!getAbility(element)) return;
     this.abilities.select(element);
+    this.abilities.warm(element);
     this.aim.setElement(element);
     this.hud.setElement(element, options);
+    this.spellbook.setSelected(element);
+    this.editor.focusAbility(element, { open: !options.silent });
+  }
+
+  /**
+   * Bind an ability to a loadout slot, from a drag or from the spellbook.
+   *
+   * Binding does not select: dragging a spell onto slot 7 while holding a
+   * charged beam should not throw the beam away.
+   */
+  bindSlot(slot, element) {
+    const ability = getAbility(element);
+    if (!ability) return;
+    if (!this.loadout.bind(slot, element)) {
+      // The commonest refusal by far is "it is already in that slot" — a
+      // shift-click on a spell that is already on the bar. Say so, because a
+      // click that does nothing at all reads as a broken target.
+      if (this.loadout.idAt(slot) === element) {
+        this.hud.showToast(`${ability.label} is already on ${this.loadout.keyAt(slot)}`);
+      }
+      return;
+    }
+    this.abilities.warm(element);
+    this.hud.showToast(`${ability.label} bound to ${this.loadout.keyAt(slot)}`);
+  }
+
+  /**
+   * Open this ability's folder in the editor.
+   *
+   * Wired to the slot's *name*, not to selection. Jumping a 1900-line settings
+   * tree to a new folder every time the player taps a different key is the kind
+   * of helpfulness that makes a UI unusable, so it takes a deliberate click.
+   * `focusAbility` is the editor's, and is feature-detected rather than
+   * assumed: the schema-driven editor lands separately, and until it does the
+   * click says where to look instead of throwing.
+   */
+  inspectAbility(element) {
+    const ability = getAbility(element);
+    if (!ability) return;
+    if (typeof this.editor.focusAbility === 'function') {
+      this.editor.focusAbility(element);
+      this.hud.showToast(`${ability.label} — editor`);
+    } else {
+      this.hud.showToast(`${ability.label} — press G for the editor`);
+    }
   }
 
   /** Select an ability and arm it, unless it is still cooling down. */
@@ -334,6 +442,12 @@ export class App {
     // Exactly one cascade shadow update per frame (see Renderer).
     gl.shadowMap.needsUpdate = true;
     this.post.sync(this.elapsed, this.flash);
+    // The one place a borrowed hook lands on the world, and the only position
+    // that works for all six: the environment has re-authored the key light
+    // from settings, `post.sync()` has re-authored the grade, and nothing has
+    // rendered yet — including the shadow map, which three refreshes inside the
+    // first `gl.render()` below. Costs one integer compare when nothing is held.
+    sceneHooks.apply();
     this.post.render();
 
     /* ---- readouts ---- */
@@ -365,8 +479,11 @@ export class App {
     this.ground.dispose();
     this.dust.dispose();
     this.contactShadows.dispose();
+    sceneHooks.uninstall();
     this.post.dispose();
     this.environment.dispose();
+    this.spellbook.dispose();
+    this.hud.dispose();
     this.editor.dispose();
     this.rig.dispose();
     this.renderer.dispose();

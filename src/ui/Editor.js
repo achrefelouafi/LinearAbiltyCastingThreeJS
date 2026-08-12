@@ -1,5 +1,7 @@
 import GUI from 'lil-gui';
 import { settings, CAST_ANIMATIONS } from '../config/settings.js';
+import { ABILITY_SCHEMAS } from '../config/abilities/index.js';
+import { abilitiesBySchool } from '../abilities/registry.js';
 import { PresetManager } from './PresetManager.js';
 
 /**
@@ -16,7 +18,205 @@ import { PresetManager } from './PresetManager.js';
  * silhouette of a frozen eruption and the shape of a frozen bolt are the things
  * worth tuning, and both abilities re-resolve themselves from these values on a
  * zero-length frame.
+ *
+ * ## A hundred abilities
+ *
+ * The stage furniture — presets, globals, the aim arrow, the far-cast circle,
+ * the environment, post, camera and character — is still hand-written here,
+ * because there is one of each and each is its own argument about what matters.
+ *
+ * The abilities are not. Six hand-written `_buildX()` methods were fine at six
+ * and would have been sixteen thousand lines at a hundred, every one of them a
+ * second place for a settings key to be forgotten. They are gone;
+ * `_buildAbility()` walks the schema that ships beside each settings block
+ * (`config/abilities/<id>.js`) and builds the same folders out of it. The six
+ * shipped abilities produce a control set identical to the one the methods
+ * produced — same folders, same order, same labels, same ranges — because the
+ * schemas were lifted from those methods rather than re-derived.
+ *
+ * Four things make the panel survive a hundred entries:
+ *
+ *  - **Schools nest.** One top-level folder per school, ability folders inside
+ *    it. Collapsed, the panel is fifteen rows plus the eight fixed sections.
+ *  - **Ability folders are built on first open.** See below — this is the one
+ *    change the roster's second half forced.
+ *  - **Search.** Type in the box under the title and the whole tree filters to
+ *    controllers whose label matches, opening the folders that hold them.
+ *    Clearing it puts every folder back the way you left it.
+ *  - **Jump.** `focusAbility(id)` opens the selected ability's folder and
+ *    scrolls it into view; `App` calls it when the player changes slot and the
+ *    ⤓ button in the header strip calls it again on demand. Scrolling past a
+ *    hundred folders to find the one you are casting is not a UI.
+ *
+ * ## Why the ability folders are lazy
+ *
+ * They were not, and at fifty abilities that was defensible. Measured in
+ * Chrome on an M-series laptop, against the real schemas:
+ *
+ * | | 50 abilities | 100 abilities |
+ * | --- | --- | --- |
+ * | `new Editor()` | 152 ms | **597 ms** |
+ * | …including first layout | 386 ms | **683 ms** |
+ * | controllers | 8,555 | 16,937 |
+ * | DOM nodes | 54,292 | **107,472** |
+ * | one keystroke in the search box | 11 ms | **48 ms** |
+ *
+ * Six hundred milliseconds is not a slow panel, it is a *stalled boot* — it
+ * happens on the main thread while the loading bar is up and nothing else can
+ * run — and a hundred thousand permanently-resident DOM nodes tax every style
+ * recalculation the page ever does afterwards, including the HUD's. All of it
+ * to build controls for ninety-nine abilities nobody has opened.
+ *
+ * So `_buildSchools()` now creates the *folders* — which is what you have to
+ * see to navigate — and parks the descriptor in `_pending`. The controls are
+ * built the first time the folder is opened, in the `onOpenClose` handler,
+ * synchronously inside the click so lil-gui's open animation still measures
+ * the right height. One ability costs about six milliseconds.
+ *
+ * The thing that nearly sank the idea is that **search has to see controls
+ * that do not exist**. Typing `mist` and getting only the two abilities you
+ * happen to have opened is worse than a slow panel; it is a lying one. The fix
+ * is that the searchable text does not come from the controllers at all — it
+ * comes from `Editor.plan()`, the same DOM-free function that decides what the
+ * controllers *will be*, run once over every schema on the first keystroke
+ * (18 ms for a hundred abilities) and cached. A query is matched against that
+ * index, the abilities it names are built, and the ordinary DOM filter then
+ * runs over a tree that now contains them.
+ *
+ * With a budget and a delay, because a one-character query names every ability
+ * in the game and building all hundred to answer it would put back the exact
+ * stall this removed — and because a 50 ms hitch between two characters of a
+ * word is what "the panel is slow" actually means to the person typing. The
+ * keystroke filters and lists; the building happens 140 ms after the typing
+ * stops. See `SEARCH_BUILD_LIMIT`.
  */
+
+/* ------------------------------------------------------------------ */
+/* School marks                                                        */
+/* ------------------------------------------------------------------ */
+/**
+ * One leading character per school.
+ *
+ * Not the sigils. `ui/glyphs/` holds 100×100 stroke SVGs and lil-gui writes its
+ * folder titles with `textContent`, so markup is not on offer — the editor gets
+ * a single glyph from the font instead, chosen to read at 11px on a dark
+ * background and to be told apart from its neighbours at a glance.
+ *
+ * Frost and storm keep the marks their hand-written folders had (`❄`, `⚡`), and
+ * arcane keeps Nova Beam's `✦`. Flame does not: `☄` is drawn as a hairline at
+ * this size and all but disappears against the panel, so the school takes the
+ * solid `✷` instead. The two zone abilities give up their own marks (`◈`, `❆`)
+ * and inherit their school's, which is the point of grouping by school —
+ * fifteen marks the eye can learn, not a hundred it cannot.
+ *
+ * The six later schools are all drawn from the BMP's geometric-shape and
+ * mathematical blocks on purpose. The obvious candidates were the pictographs
+ * — `⚒` for forge, `☀` for lumen, `⚙` for gearlock — and every one of them is
+ * an emoji-presentation codepoint on macOS and Windows both: the browser
+ * substitutes a colour emoji font, the glyph arrives at twice the line height
+ * in full colour, and the folder title jumps a pixel. Monochrome outline
+ * characters do not have that problem. Hive would obviously like `⬡`, which is
+ * stone's `⬢` with the fill taken out and indistinguishable from it at 11px,
+ * so it takes `※` — many marks read as one, which is the school.
+ */
+const SCHOOL_MARK = Object.freeze({
+  frost: '❄',
+  flame: '✷',
+  storm: '⚡',
+  stone: '⬢',
+  verdant: '✿',
+  void: '◍',
+  arcane: '✦',
+  blood: '✜',
+  aether: '❂',
+  tide: '≋', //  three waves
+  forge: '▤', //  a brushed plate
+  lumen: '☼', //  a sun that is not an emoji
+  ink: '▮', //  the slab, and the stroke it makes
+  chrono: '◷', //  a quarter gone
+  hive: '※' //  many marks, one shape
+});
+
+/** A school with no mark still gets a bullet, so titles stay aligned. */
+const DEFAULT_MARK = '◇';
+
+/* ------------------------------------------------------------------ */
+/* Inference tables                                                    */
+/* ------------------------------------------------------------------ */
+
+/** `#rrggbb`, the only colour spelling the settings tree uses. */
+const HEX = /^#[0-9a-f]{6}$/i;
+
+/** Key names that name a *quantity of things*, and therefore step by one. */
+const COUNTED =
+  /(count|facets|octaves|steps|strands|arms|spokes|ticks|dashes|shards|sparks|debris|embers|motes|rings|coils|tendrils|arcs|branches|cuts|craters|plates|segments|points|chunks)$/i;
+
+/**
+ * Key names that are a *measurement*, whatever their value happens to be.
+ *
+ * These veto the "a whole number of eight or more is a count" rule below. A
+ * range of 18 metres and a lifetime of 12 seconds are both integers today and
+ * neither wants a step of one — `range` in particular is the dial most likely
+ * to be dragged, and a whole-metre track makes it useless.
+ */
+const CONTINUOUS =
+  /(range|radius|height|width|length|size|scale|time|life|lifetime|delay|duration|speed|distance|intensity|opacity|gravity|angle|depth|curve|falloff|power)$/i;
+
+/** Key names somebody will want to run backwards, so their track is symmetric. */
+const SIGNED = /(speed|spin|crawl|twist|sag|lean|drift|wander|scroll|bias|flow|tilt|shear|sweep)$/i;
+
+/**
+ * How many unbuilt abilities one search is allowed to build, and how much of a
+ * query has to be typed before it is allowed to build any.
+ *
+ * A search that matches four abilities should open into their controls, the
+ * way it always has — that is the whole value of the box. A search that
+ * matches ninety is a different question: three thousand visible controllers
+ * is not a result, it is the panel again, and building them costs the
+ * half-second the laziness was introduced to remove.
+ *
+ * Past the budget the matching abilities are still *listed* — their folders
+ * show, closed, in the filtered tree — and clicking one builds it and drops
+ * you into its matching controls. So a broad query degrades into "here are the
+ * eleven abilities with a `mist` control", which is a reasonable answer to a
+ * broad query, rather than into a stall.
+ *
+ * The minimum length exists because a two-character query is a prefix on the
+ * way somewhere rather than a question, and the eight abilities `mi` names are
+ * not the eight `mist` names — building for both is building sixteen to answer
+ * one.
+ *
+ * The delay is why typing does not stutter at all. Building costs about six
+ * milliseconds an ability, so a budget of eight is a ~50 ms hitch, and a hitch
+ * in the middle of a word is exactly the thing people describe as "the panel
+ * is slow". So the keystroke does the cheap half — filter what exists, list
+ * what does not — and the expensive half runs once the typing stops. 140 ms is
+ * comfortably longer than a fast typist's inter-key gap and short enough that
+ * it reads as the panel settling rather than as a wait.
+ */
+const SEARCH_BUILD_LIMIT = 8;
+const SEARCH_BUILD_MIN = 3;
+const SEARCH_BUILD_DELAY = 140; //  ms of quiet before a search builds anything
+
+/** ms after a folder is clicked before its animated height is released. */
+const UNCLAMP_DELAY = 340; //  lil-gui's transition is 300 ms
+
+/** Readable ceilings: one of these × a power of ten. */
+const NICE = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+
+/** Readable steps. Coarser than the ceilings on purpose — 2.5 is not a step. */
+const NICE_STEP = [1, 2, 5, 10];
+
+/** Smallest of `list` × a power of ten that is ≥ `x`. `x` > 0. */
+function niceUp(x, list) {
+  const decade = 10 ** Math.floor(Math.log10(x));
+  for (const n of list) {
+    const candidate = n * decade;
+    if (candidate >= x - 1e-12) return Number(candidate.toPrecision(6));
+  }
+  return Number((10 * decade).toPrecision(6));
+}
+
 export class Editor {
   /**
    * @param {object} hooks { onClear, onToast }
@@ -30,20 +230,37 @@ export class Editor {
 
     this._presetState = { name: 'My preset', selected: this.presets.names[0] ?? '' };
 
+    /** school id → its top-level folder. */
+    this.schoolFolders = new Map();
+    /** ability id → { school, folder, ability }, the pair `focusAbility` opens. */
+    this.abilityFolders = new Map();
+    /** folder → the descriptor whose controls it has not built yet. */
+    this._pending = new Map();
+    /** the `.lil-title` element of each ability folder → that folder. */
+    this._byTitle = new Map();
+    /** ability id → every label under it, lower case. Built on first search. */
+    this._searchIndex = null;
+    /** Unbuilt ability folders the running query names but could not afford. */
+    this._hits = new Set();
+    /** Pending "the typing stopped, finish the search" timer. */
+    this._settleTimer = 0;
+
+    this._activeAbility = null;
+    /** The `{ school, folder }` pair `focusAbility` last opened. */
+    this._focused = null;
+    /** Folder collapse state as it was before the current search. */
+    this._preSearch = null;
+
     this._buildPresets();
     this._buildGlobal();
     this._buildAim();
     this._buildZone();
-    this._buildIce();
-    this._buildThunder();
-    this._buildMeteor();
-    this._buildBeam();
-    this._buildSnare();
-    this._buildGlacier();
+    this._buildSchools();
     this._buildEnvironment();
     this._buildPost();
     this._buildCamera();
     this._buildCharacter();
+    this._buildTools();
 
     // Everything starts collapsed, top-level folders included. There are enough
     // controls here that any folder left open pushes the rest off the screen,
@@ -66,8 +283,8 @@ export class Editor {
    * beam and the snare should not be cast the same way. `App` reads the value
    * at the moment of the cast, so switching it applies to the very next click.
    */
-  static castAnimation(folder, object) {
-    return folder.add(object, 'castAnim', CAST_ANIMATIONS).name('cast animation');
+  static castAnimation(folder, object, label = 'cast animation') {
+    return folder.add(object, 'castAnim', CAST_ANIMATIONS).name(label);
   }
 
   /**
@@ -95,6 +312,633 @@ export class Editor {
   toggle() {
     this._hidden = !this._hidden;
     this.gui.show(!this._hidden);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* the generic ability builder                                         */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * A schema and a settings block, resolved into a flat build list.
+   *
+   * Pure, static and DOM-free on purpose: this is the one place that decides
+   * *what controls an ability has*, so the headless harness (`npm run check`)
+   * can ask the same question the panel asks without a WebGL context or a
+   * `document`. `_buildAbility()` is then a switch over the answer.
+   *
+   * Each step is `{ folder, kind, key, label }` plus what its kind needs:
+   *
+   * | kind | extra | drawn as |
+   * | --- | --- | --- |
+   * | `range` | `min`, `max`, `step` | a slider |
+   * | `color` | — | a picker |
+   * | `gradient` | `prefix` | a sub-folder of four pickers |
+   * | `castAnim` | — | the clip dropdown |
+   * | `boolean` | — | a checkbox |
+   * | `string` | — | a text field |
+   * | `missing` | — | nothing; the schema names a key the block does not have |
+   *
+   * `folder` is the path as an array, so `'The fire trail/Silhouette'` arrives
+   * as `['The fire trail', 'Silhouette']` and the builder does not parse
+   * strings twice.
+   *
+   * `missing` steps are emitted rather than swallowed. A schema that has drifted
+   * off its block is a real defect — it is how a control silently disappears —
+   * and this is the seam a checker can grep for.
+   *
+   * @param {object} schema `config/abilities/<id>.js`'s `<id>Schema`, or undefined
+   * @param {object} block  the live settings block
+   * @returns {Array<object>} build steps, in build order
+   */
+  static plan(schema, settingsBlock) {
+    // Both halves are allowed to be absent: a registry entry whose settings
+    // module has not landed yet should give an empty folder, not take the whole
+    // panel — and with it the boot — down with a TypeError.
+    const block = settingsBlock ?? {};
+    const steps = [];
+    const seen = new Set();
+
+    for (const [path, entries] of Object.entries(schema ?? {})) {
+      const folder = path
+        .split('/')
+        .map((part) => part.trim())
+        .filter(Boolean);
+      for (const entry of entries) steps.push(Editor._step(folder, entry, block, seen));
+    }
+
+    // Anything the schema forgot. A block key that no folder mentions still gets
+    // a control, filed at the bottom under "More", so the panel is never a *lie*
+    // about what is in `settings[id]` — only untidy about it. An ability whose
+    // schema has not been written yet renders entirely out of this branch, which
+    // is what lets a registry entry land before its layout does.
+    const more = [];
+    for (const key of Object.keys(block)) {
+      if (!seen.has(key)) more.push(Editor._step(['More'], key, block, seen));
+    }
+
+    return steps.concat(more);
+  }
+
+  /**
+   * One schema entry → one build step. See `config/abilities/index.js` for the
+   * entry forms; the shape is read by `length`, never by sniffing the value.
+   */
+  static _step(folder, entry, block, seen) {
+    if (typeof entry === 'string') return Editor._infer(folder, entry, entry, block, seen);
+
+    const [key] = entry;
+
+    // `['colorMist*', 'Mist colour']` — the four lifetime stops as one entry.
+    if (typeof key === 'string' && key.endsWith('*')) {
+      const prefix = key.slice(0, -1);
+      const stops = ['A', 'B', 'C', 'D'].map((suffix) => `${prefix}${suffix}`);
+      // A quartet with a stop missing is not a gradient. The remaining stops are
+      // deliberately *not* marked seen, so they fall through to "More" as plain
+      // pickers rather than disappearing along with the group.
+      if (stops.some((stop) => !(stop in block))) {
+        return { folder, kind: 'missing', key, label: entry[1] ?? prefix };
+      }
+      for (const stop of stops) seen.add(stop);
+      return { folder, kind: 'gradient', key, prefix, label: entry[1] ?? prefix };
+    }
+
+    // `['key', min, max, step]` / `['key', min, max, step, 'label']`, and the
+    // three-element form for the rare dial that wants its own ends but not its
+    // own precision.
+    if (entry.length >= 3) {
+      const [, min, max, step, label] = entry;
+      seen.add(key);
+      if (!(key in block)) return { folder, kind: 'missing', key, label: label ?? key };
+      return {
+        folder,
+        kind: 'range',
+        key,
+        label: label ?? key,
+        min,
+        max,
+        step: step ?? niceUp((max - min) / 400, NICE_STEP)
+      };
+    }
+
+    // `['key', 'label']` — the type comes from the value.
+    return Editor._infer(folder, key, entry[1] ?? key, block, seen);
+  }
+
+  /** A key with no authored range: the type from its value, the range guessed. */
+  static _infer(folder, key, label, block, seen) {
+    seen.add(key);
+    if (!(key in block)) return { folder, kind: 'missing', key, label };
+
+    const value = block[key];
+
+    if (key === 'castAnim') return { folder, kind: 'castAnim', key, label };
+    if (typeof value === 'boolean') return { folder, kind: 'boolean', key, label };
+    if (typeof value === 'string') {
+      return { folder, kind: HEX.test(value) ? 'color' : 'string', key, label };
+    }
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return { folder, kind: 'missing', key, label };
+    }
+    return { folder, kind: 'range', key, label, ...Editor.inferRange(key, value) };
+  }
+
+  /**
+   * A range for a key nobody wrote a tuple for.
+   *
+   * This is the fallback that makes a schema *incomplete* rather than *wrong*:
+   * a slider added to a settings block during a tuning session appears in the
+   * panel on the next reload without anyone touching the layout. It guesses
+   * from two things and nothing else — the magnitude of the shipped value and
+   * the shape of the key's name.
+   *
+   *  - **The ceiling is three times the shipped value**, rounded up to a
+   *    readable number. Three because a control pinned to its own maximum can
+   *    only ever come down, and ten would leave the interesting quarter of the
+   *    track inside the first three millimetres.
+   *  - **Counts step by one.** A key is a count when its name ends in one of
+   *    the plural nouns this project actually uses (`…Count`, `…Facets`,
+   *    `…Strands`, `…Shards`), or when the shipped value is a whole number of
+   *    eight or more *and* the name is not a measurement — `range: 18` is
+   *    eighteen metres, not eighteen of anything, and a whole-metre track on
+   *    the most-dragged dial in the panel would be a poor joke.
+   *  - **A negative default gets a negative track** — gravity is the whole
+   *    reason — and a name ending in a signed word (`…Speed`, `…Spin`,
+   *    `…Crawl`, `…Lean`) gets a symmetric one.
+   *  - **A zero default carries no magnitude**, so it gets `0..1`. That is the
+   *    case where the guess is worst, and the fix is a tuple in the schema.
+   *
+   * A guessed range is never as good as an authored one, and none of the six
+   * shipped abilities uses it: all ~900 of their controls carry their own
+   * min/max/step, arrived at by dragging rather than by rounding the default.
+   * The first thing to do with a control that turns up in "More" is to give it
+   * a folder and a tuple.
+   *
+   * @returns {{min:number, max:number, step:number}}
+   */
+  static inferRange(key, value) {
+    const magnitude = Math.abs(value);
+    const counted =
+      Number.isInteger(value) && (COUNTED.test(key) || (magnitude >= 8 && !CONTINUOUS.test(key)));
+    const ceiling = magnitude > 0 ? niceUp(magnitude * 3, NICE) : 1;
+
+    const symmetric = SIGNED.test(key);
+    const min = value < 0 ? -ceiling : symmetric ? -ceiling : 0;
+    const max = value < 0 && !symmetric ? 0 : ceiling;
+
+    const step = counted ? 1 : niceUp((max - min) / 400, NICE_STEP);
+    return { min, max, step };
+  }
+
+  /**
+   * Build one ability's folder from its schema.
+   *
+   * Folders are created on first mention and memoised by path, so the schema
+   * can nest with a `/` in the key and the map underneath stays flat. A step
+   * whose kind is `missing` draws nothing — the schema named a key the block no
+   * longer has, and a controller bound to `undefined` is worse than a gap.
+   */
+  _buildAbility(root, ability) {
+    const block = ability.settings ?? {};
+    const plan = Editor.plan(ABILITY_SCHEMAS[ability.id], block);
+    const folders = new Map([['', root]]);
+
+    for (const step of plan) {
+      if (step.kind === 'missing') continue;
+      const folder = this._folderAt(root, folders, step.folder);
+
+      switch (step.kind) {
+        case 'range':
+          Editor.range(folder, block, step.key, step.min, step.max, step.step, step.label);
+          break;
+        case 'color':
+          folder.addColor(block, step.key).name(step.label);
+          break;
+        case 'gradient':
+          Editor.gradient(folder, block, step.prefix, step.label);
+          break;
+        case 'castAnim':
+          Editor.castAnimation(folder, block, step.label);
+          break;
+        default:
+          // boolean and string: lil-gui picks the widget off the value's type.
+          folder.add(block, step.key).name(step.label);
+          break;
+      }
+    }
+
+    return root;
+  }
+
+  /** `['The fire trail', 'Silhouette']` → the folder, creating what is missing. */
+  _folderAt(root, folders, path) {
+    let folder = root;
+    let key = '';
+    for (const name of path) {
+      key = key ? `${key}/${name}` : name;
+      let child = folders.get(key);
+      if (!child) {
+        child = folder.addFolder(name);
+        folders.set(key, child);
+      }
+      folder = child;
+    }
+    return folder;
+  }
+
+  /**
+   * One folder per school, in registry order, with its abilities inside it —
+   * as empty folders, filled in on first open.
+   *
+   * The nesting is the whole reason the panel still works at a hundred: a
+   * school folder collapses everything under it, so the default view is
+   * fifteen rows and the count in each title says how much is behind it. A
+   * school with no abilities yet does not appear at all; `abilitiesBySchool()`
+   * drops it, and an empty folder is a row that promises something.
+   */
+  _buildSchools() {
+    for (const { school, abilities } of abilitiesBySchool()) {
+      const mark = SCHOOL_MARK[school.id] ?? DEFAULT_MARK;
+      const folder = this.gui.addFolder(`${mark}  ${school.label}  ·  ${abilities.length}`);
+      this.schoolFolders.set(school.id, folder);
+
+      for (const ability of abilities) {
+        const sub = folder.addFolder(`${mark}  ${ability.label}`);
+        this._pending.set(sub, ability);
+        this._byTitle.set(sub.$title, sub);
+        this.abilityFolders.set(ability.id, { school: folder, folder: sub, ability });
+      }
+    }
+
+    /*
+     * Build on the way *into* lil-gui's own click handler, not after it.
+     *
+     * The obvious hook is `onOpenClose`, and it is wrong here by one frame.
+     * lil-gui animates a folder open by scheduling a `requestAnimationFrame`
+     * that measures `$children.scrollHeight` and transitions to it; children
+     * that appear after that measurement are inside an element whose height
+     * has already been decided, and the folder opens to nothing. (Worse: the
+     * height ends up 0 → 0, no `transitionend` fires, and the inline
+     * `height: 0px` never gets cleared, so the folder stays empty until it is
+     * clicked twice.) It is a genuinely confusing failure — the controls exist
+     * in the DOM, they are simply inside a box of zero height.
+     *
+     * A capture-phase listener on the panel root runs before any listener on
+     * the title itself, so by the time lil-gui starts the animation the
+     * controls are already there and it measures the real height. A listener
+     * added to `$title` directly would not do: at the target element, handlers
+     * run in registration order regardless of the capture flag, and lil-gui
+     * registered first.
+     */
+    this.gui.domElement.addEventListener(
+      'click',
+      (event) => {
+        const title = event.target?.closest?.('.lil-title');
+        if (!title) return;
+        const folder = this._byTitle.get(title);
+        if (folder) this._realise(folder);
+        this._unclamp(title.parentElement);
+      },
+      true
+    );
+
+    // And a fallback for the folders opened from code rather than from a
+    // click — `open()` has no animation and no measurement, so late children
+    // are fine there. `focusAbility` realises explicitly anyway; this is here
+    // so that no future caller can find an empty folder.
+    this.gui.onOpenClose((changed) => {
+      if (!changed._closed) this._realise(changed);
+    });
+  }
+
+  /**
+   * Build an ability folder's controls, if they are not built already.
+   *
+   * @param {object} folder a lil-gui folder
+   * @returns {boolean} whether anything was built
+   */
+  _realise(folder) {
+    const ability = this._pending.get(folder);
+    if (!ability) return false;
+
+    // Deleted first: `_buildAbility` creates sub-folders, and a sub-folder is
+    // created *open*, which re-enters this handler for the child. Without the
+    // delete the child would look up its parent's descriptor and build the
+    // whole ability a second time into itself.
+    this._pending.delete(folder);
+    this._byTitle.delete(folder.$title);
+    this._buildAbility(folder, ability);
+
+    // Filling a folder that is *already* open — the programmatic path — leaves
+    // whatever height a previous animation pinned on it. Clearing the inline
+    // height lets it size to the content that has just arrived.
+    if (!folder._closed) {
+      folder.$children.style.height = '';
+      folder.domElement.classList.remove('lil-transition');
+    }
+
+    // Everything in this panel starts collapsed — see the constructor. The
+    // folders that have just appeared were born open, so they are put back to
+    // the state they would have been in had they existed at boot.
+    for (const child of folder.foldersRecursive()) {
+      child.close();
+      // A search is running: these folders did not exist when the collapse
+      // state was snapshotted, so record them or clearing the box leaves them
+      // expanded behind the restored tree.
+      if (this._preSearch) this._preSearch.push([child, true]);
+    }
+
+    return true;
+  }
+
+  /**
+   * Undo lil-gui's open animation once it has had its chance.
+   *
+   * Not part of the lazy building — this is an older bug that a hundred
+   * ability folders would have made everyone's problem. lil-gui opens a folder
+   * by pinning an inline pixel height on its children and clearing that height
+   * again on `transitionend`. Its measurement is taken one frame after the
+   * click, and on a folder's *first* open in this panel it frequently comes
+   * back as zero: the children are still `display: none` under
+   * `.lil-closed:not(.lil-transition)` at the moment `clientHeight` is read.
+   * A height of zero animating to zero fires no `transitionend`, so nothing
+   * ever clears it, and the folder stays open and permanently clamped shut —
+   * which is why "Presets" (nothing lazy about it) opens empty and needs a
+   * second click. It is easy to blame that on whatever changed most recently.
+   *
+   * Clearing the inline height after the animation window costs nothing when
+   * the animation worked, and unclamps the folder when it did not.
+   *
+   * @param {HTMLElement} element the folder's `.lil-gui` element
+   */
+  _unclamp(element) {
+    setTimeout(() => {
+      const children = element?.querySelector(':scope > .lil-children');
+      if (!children) return;
+      element.classList.remove('lil-transition');
+      children.style.height = '';
+    }, UNCLAMP_DELAY);
+  }
+
+  /**
+   * Every control label an ability *will* have, without building any of them.
+   *
+   * `Editor.plan()` is the same function `_buildAbility()` walks, so the index
+   * cannot disagree with the panel about what a control is called — which is
+   * the failure that makes a lazy tree unsearchable. Built once, on the first
+   * keystroke rather than at boot, because most sessions never search.
+   *
+   * @returns {Map<string, string>} ability id → its labels, newline-joined
+   */
+  _index() {
+    if (this._searchIndex) return this._searchIndex;
+
+    this._searchIndex = new Map();
+    for (const [id, entry] of this.abilityFolders) {
+      const words = new Set();
+      for (const step of Editor.plan(ABILITY_SCHEMAS[id], entry.ability.settings ?? {})) {
+        if (step.kind === 'missing') continue;
+        words.add(String(step.label).toLowerCase());
+        for (const part of step.folder) words.add(part.toLowerCase());
+        // A gradient is one schema entry and four controllers, and the four are
+        // named here rather than in the schema. Searching "death" has always
+        // found every gradient's last stop; it still does.
+        if (step.kind === 'gradient') {
+          words.add('birth');
+          words.add('early');
+          words.add('late');
+          words.add('death');
+        }
+      }
+      this._searchIndex.set(id, [...words].join('\n'));
+    }
+    return this._searchIndex;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* the header strip: search and jump                                   */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * The two affordances that make a thousand controllers navigable.
+   *
+   * They live in a strip of our own between lil-gui's title bar and its
+   * scrolling children, which is the only place in the panel that does not
+   * scroll away. The jump button is *not* inside the title: lil-gui's title is
+   * itself a `<button>`, a button inside a button is invalid, and the click
+   * would collapse the panel on its way past.
+   */
+  _buildTools() {
+    const bar = document.createElement('div');
+    bar.className = 'editor-tools';
+
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.className = 'editor-tools__search';
+    search.placeholder = 'Search controls…';
+    search.setAttribute('aria-label', 'Search controls');
+    search.addEventListener('input', () => this._filter(search.value));
+    search.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      search.value = '';
+      this._filter('');
+      search.blur();
+    });
+
+    const jump = document.createElement('button');
+    jump.type = 'button';
+    jump.className = 'editor-tools__jump';
+    jump.textContent = '⤓';
+    jump.title = 'Jump to the selected ability';
+    jump.addEventListener('click', () => this.focusAbility(this._activeAbility));
+
+    bar.append(search, jump);
+    this.gui.domElement.insertBefore(bar, this.gui.$children);
+
+    this._search = search;
+    this._jump = jump;
+  }
+
+  /**
+   * Filter the whole tree by controller label.
+   *
+   * Folder titles match too, and a matching folder shows *everything* inside
+   * it: typing `mist` should give you the whole "Mist, chips & glitter" folder,
+   * not the four controllers that happen to have the word in their own label,
+   * and typing `frost lance` should give you the ability. That cascade is the
+   * `inherited` flag below.
+   *
+   * The collapse state is snapshotted the moment a search begins and put back
+   * the moment it ends, so filtering is a lens rather than an edit: whatever
+   * you had open before you typed is what you get back when you clear the box.
+   */
+  _filter(query) {
+    const needle = query.trim().toLowerCase();
+
+    if (!needle) {
+      this._restore();
+      return;
+    }
+
+    if (!this._preSearch) {
+      this._preSearch = this.gui.foldersRecursive().map((folder) => [folder, folder._closed]);
+    }
+
+    // The cheap half, on the keystroke: which unbuilt abilities the query
+    // names, so the DOM pass can list their folders. Free once the index
+    // exists — a `Map` lookup and a substring test per ability — and on the
+    // very first keystroke the index does not exist yet, so unbuilt abilities
+    // match on their title alone and the rest arrive with the settle below.
+    this._hits.clear();
+    for (const [id, entry] of this.abilityFolders) {
+      if (!this._pending.has(entry.folder)) continue;
+      if ((this._searchIndex?.get(id) ?? '').includes(needle)) this._hits.add(entry.folder);
+    }
+
+    this._filterFolder(this.gui, needle, false);
+    this.gui.open();
+
+    // The expensive half, once the typing stops.
+    clearTimeout(this._settleTimer);
+    if (needle.length >= SEARCH_BUILD_MIN) {
+      this._settleTimer = setTimeout(() => this._settleSearch(needle), SEARCH_BUILD_DELAY);
+    }
+  }
+
+  /**
+   * Finish a search: build the index if this is the first one, build the
+   * controls of the abilities the query names, and re-run the filter over the
+   * tree that now contains them.
+   *
+   * Deliberately allowed to be slow. It runs on a timer after the last
+   * keystroke, so the cost lands in a gap in the user's own typing rather than
+   * between two of their characters, and `_filter` cancels it the moment
+   * another key arrives.
+   */
+  _settleSearch(needle) {
+    const index = this._index();
+
+    // Registry order, so the same query always builds the same eight rather
+    // than whichever the Map happened to yield first.
+    let budget = SEARCH_BUILD_LIMIT;
+    let built = 0;
+    this._hits.clear();
+    for (const [id, entry] of this.abilityFolders) {
+      if (!this._pending.has(entry.folder)) continue;
+      const named =
+        String(entry.folder._title ?? '').toLowerCase().includes(needle) ||
+        (index.get(id) ?? '').includes(needle);
+      if (!named) continue;
+      if (budget > 0) {
+        budget--;
+        if (this._realise(entry.folder)) built++;
+      } else {
+        this._hits.add(entry.folder);
+      }
+    }
+
+    this._filterFolder(this.gui, needle, false);
+    this.gui.open();
+    return built;
+  }
+
+  /** @returns {boolean} whether anything under `folder` survived the filter. */
+  _filterFolder(folder, needle, inherited) {
+    const self =
+      inherited || (folder !== this.gui && String(folder._title ?? '').toLowerCase().includes(needle));
+
+    // An ability whose controls were not built has nothing to walk, and its
+    // schema index has already answered for it. Shown, closed, as a row the
+    // user can click into — never opened, because opening it here would build
+    // it and put the budget back where it started.
+    if (this._pending.has(folder)) return self || this._hits.has(folder);
+
+    let hit = false;
+    for (const controller of folder.controllers) {
+      const show = self || String(controller._name ?? '').toLowerCase().includes(needle);
+      controller.show(show);
+      hit = hit || show;
+    }
+
+    for (const child of folder.folders) {
+      const childHit = this._filterFolder(child, needle, self);
+      child.show(childHit);
+      if (childHit && !this._pending.has(child)) child.open();
+      hit = hit || childHit;
+    }
+
+    return hit || self;
+  }
+
+  /** Undo a filter: everything visible again, every folder as it was. */
+  _restore() {
+    clearTimeout(this._settleTimer);
+    this._hits.clear();
+    this.gui.controllersRecursive().forEach((controller) => controller.show());
+    this.gui.foldersRecursive().forEach((folder) => folder.show());
+
+    if (this._preSearch) {
+      for (const [folder, closed] of this._preSearch) folder.open(!closed);
+      this._preSearch = null;
+    }
+  }
+
+  /**
+   * Open an ability's folder and put it under the user's eyes.
+   *
+   * `App` calls this when the player changes slot, so the panel follows the
+   * spellbook instead of being scrolled to match it; the ⤓ button calls it
+   * again for the ability already selected, which is what you want after you
+   * have wandered off into Environment. Exactly one ability folder is left open
+   * at a time — the previously focused pair is closed on the way — so the panel
+   * does not silently grow a column of expanded schools behind you.
+   *
+   * @param {string} id ability id, as in the registry
+   * @param {object} [options]
+   * @param {boolean} [options.open=true]  open and scroll; `false` only records
+   *   the selection, which is what boot-time slotting wants — the panel must
+   *   still come up fully collapsed.
+   * @param {boolean} [options.scroll=open] scroll the folder into view
+   */
+  focusAbility(id, { open = true, scroll = open } = {}) {
+    const entry = id ? this.abilityFolders.get(id) : null;
+
+    if (id && entry) {
+      this._activeAbility = id;
+      if (this._jump) this._jump.title = `Jump to ${this._jumpLabel(entry)}`;
+    }
+    if (!entry || !open) return;
+
+    // A standing filter would leave the folder hidden behind the search, so the
+    // jump wins: the box is cleared and the tree comes back first. The test is
+    // the snapshot, not the box — `_filter()` can be driven from code as well as
+    // from typing, and a jump landing on a folder that is still `hidden` is a
+    // panel that has silently gone blank.
+    if (this._preSearch) {
+      if (this._search) this._search.value = '';
+      this._restore();
+    }
+
+    const previous = this._focused;
+    if (previous && previous !== entry) {
+      previous.folder.close();
+      if (previous.school !== entry.school) previous.school.close();
+    }
+
+    // Before the open rather than as a side effect of it: the folder is about
+    // to be scrolled into view, and a folder that grows its contents after the
+    // scroll has been computed lands with its title off the top of the panel.
+    this._realise(entry.folder);
+    entry.school.open();
+    entry.folder.open();
+    this.gui.open();
+    this._focused = entry;
+
+    if (scroll) entry.folder.domElement.scrollIntoView?.({ block: 'nearest' });
+  }
+
+  /** The ability's own title, minus the school mark, for the button tooltip. */
+  _jumpLabel(entry) {
+    return String(entry.folder._title ?? '').trim().replace(/^\S+\s+/, '');
   }
 
   /* ------------------------------------------------------------------ */
@@ -370,1199 +1214,6 @@ export class Editor {
 
   /* ------------------------------------------------------------------ */
 
-  _buildIce() {
-    const folder = this.gui.addFolder('❄  Frost Lance');
-    const c = settings.ice;
-    const R = Editor.range;
-
-    const cast = folder.addFolder('The cast');
-    R(cast, c, 'range', 2, 40, 0.1, 'max range');
-    R(cast, c, 'minRange', 0, 10, 0.1, 'min range');
-    R(cast, c, 'speed', 2, 80, 0.5, 'front speed');
-    R(cast, c, 'lifetime', 0.2, 12, 0.1, 'field lifetime');
-    R(cast, c, 'cooldown', 0, 6, 0.05, 'cooldown');
-    Editor.castAnimation(cast, c);
-
-    const field = folder.addFolder('Footprint');
-    R(field, c, 'widthNear', 0.05, 6, 0.01, 'width at caster');
-    R(field, c, 'width', 0.1, 10, 0.05, 'width at target');
-    R(field, c, 'widthCurve', 0.2, 4, 0.01, 'width curve');
-    R(field, c, 'spikeCount', 4, 288, 1, 'crystal count');
-    R(field, c, 'density', 0.05, 1, 0.01, 'density');
-    R(field, c, 'clumping', 0.3, 4, 0.01, 'pull to centre');
-    R(field, c, 'scatter', 0, 2, 0.01, 'lateral scatter');
-    R(field, c, 'frontBias', 0.3, 3, 0.01, 'crowd toward target');
-
-    const shape = folder.addFolder('Silhouette');
-    R(shape, c, 'heightNear', 0.05, 6, 0.01, 'height at caster');
-    R(shape, c, 'height', 0.1, 12, 0.05, 'height at target');
-    R(shape, c, 'heightCurve', 0.2, 5, 0.01, 'height curve');
-    R(shape, c, 'heightJitter', 0, 1.5, 0.01, 'height jitter');
-    R(shape, c, 'crown', 0, 0.95, 0.01, 'flank falloff');
-    R(shape, c, 'peak', 1, 4, 0.01, 'swell at target');
-    R(shape, c, 'peakWidth', 0.02, 1, 0.01, 'swell width');
-    R(shape, c, 'rubble', 0, 1, 0.01, 'rubble fraction');
-    R(shape, c, 'rubbleScale', 0.05, 1, 0.01, 'rubble height');
-
-    // These four regenerate the crystal geometry — see IceAbility#_syncGeometry.
-    const crystal = folder.addFolder('The crystal');
-    R(crystal, c, 'radius', 0.02, 1.5, 0.01, 'base radius');
-    R(crystal, c, 'radiusJitter', 0, 1.5, 0.01, 'radius jitter');
-    R(crystal, c, 'taper', 0.01, 0.8, 0.01, 'tip taper');
-    R(crystal, c, 'facets', 3, 10, 1, 'facets');
-    R(crystal, c, 'roughness', 0, 1, 0.01, 'surface roughness');
-    R(crystal, c, 'bend', 0, 1.5, 0.01, 'bend');
-    R(crystal, c, 'lean', 0, 1.4, 0.01, 'lean from caster');
-    R(crystal, c, 'leanJitter', 0, 1.5, 0.01, 'lean jitter');
-    R(crystal, c, 'twist', 0, 1, 0.01, 'random yaw');
-
-    const rise = folder.addFolder('The eruption');
-    R(rise, c, 'riseTime', 0.02, 1.5, 0.01, 'rise time');
-    R(rise, c, 'riseOvershoot', 0, 1, 0.01, 'punch overshoot');
-    R(rise, c, 'riseStagger', 0, 1, 0.005, 'stagger');
-    R(rise, c, 'settle', 0.05, 2, 0.01, 'settle time');
-    R(rise, c, 'shatterDelay', 0, 4, 0.05, 'hold before sinking');
-    R(rise, c, 'sinkTime', 0.1, 4, 0.05, 'sink time');
-
-    const material = folder.addFolder('Ice material');
-    material.addColor(c, 'colorDeep').name('deep');
-    material.addColor(c, 'colorIce').name('body');
-    material.addColor(c, 'colorRim').name('rim');
-    material.addColor(c, 'colorCore').name('inner light');
-    R(material, c, 'opacity', 0, 1, 0.01, 'opacity');
-    R(material, c, 'depthTint', 0, 3, 0.01, 'thickness tint');
-    R(material, c, 'fresnel', 0, 6, 0.01, 'fresnel');
-    R(material, c, 'fresnelPower', 0.5, 6, 0.05, 'fresnel power');
-    R(material, c, 'translucency', 0, 4, 0.01, 'translucency');
-    R(material, c, 'envIntensity', 0, 3, 0.01, 'reflection');
-    R(material, c, 'facetSharp', 0, 1.5, 0.01, 'facet contrast');
-    R(material, c, 'fracture', 0, 2, 0.01, 'internal cracks');
-    R(material, c, 'fractureScale', 0.5, 20, 0.1, 'crack scale');
-    R(material, c, 'veins', 0, 2, 0.01, 'feather frost');
-    R(material, c, 'veinScale', 0.2, 10, 0.05, 'frost scale');
-    R(material, c, 'glint', 0, 5, 0.01, 'surface glint');
-    R(material, c, 'glintScale', 4, 90, 0.5, 'glint scale');
-    R(material, c, 'glintSpeed', 0, 4, 0.01, 'glint speed');
-    R(material, c, 'frostLine', 0, 1.5, 0.01, 'rime at the base');
-    R(material, c, 'glow', 0, 5, 0.01, 'glow');
-    R(material, c, 'edgeGlow', 0, 6, 0.01, 'edge glow');
-    R(material, c, 'birthGlow', 0, 10, 0.05, 'birth flash');
-    R(material, c, 'birthFade', 0.02, 2, 0.01, 'birth flash time');
-
-    const ground = folder.addFolder('Frost on the ground');
-    R(ground, c, 'frostSpread', 0.1, 5, 0.01, 'patch radius');
-    R(ground, c, 'frostRate', 0.2, 12, 0.1, 'patches / metre');
-    R(ground, c, 'frostLife', 0.5, 20, 0.1, 'patch lifetime');
-    R(ground, c, 'frostIntensity', 0, 2, 0.01, 'intensity');
-    R(ground, c, 'frostCrystals', 0, 4, 0.01, 'snow grain');
-    R(ground, c, 'shockRadius', 0.5, 20, 0.1, 'shockwave radius');
-    ground.addColor(c, 'colorFrost').name('snow');
-    ground.addColor(c, 'colorFrostEdge').name('snow shadow');
-    ground.addColor(c, 'colorShockA').name('shockwave ring');
-    ground.addColor(c, 'colorShockB').name('shockwave crest');
-
-    const mist = folder.addFolder('Mist, chips & glitter');
-    R(mist, c, 'mistRate', 0, 900, 1, 'mist rate');
-    R(mist, c, 'mistSize', 0.05, 4, 0.01, 'mist size');
-    R(mist, c, 'mistSpeed', 0, 8, 0.05, 'mist speed');
-    R(mist, c, 'mistLifetime', 0.2, 8, 0.05, 'mist lifetime');
-    R(mist, c, 'mistOpacity', 0, 2, 0.01, 'mist opacity');
-    R(mist, c, 'mistRise', -2, 4, 0.01, 'mist rise');
-    R(mist, c, 'shardRate', 0, 500, 1, 'chip rate');
-    R(mist, c, 'shardSize', 0.005, 0.5, 0.005, 'chip size');
-    R(mist, c, 'shardSpeed', 0, 25, 0.1, 'chip speed');
-    R(mist, c, 'shardLifetime', 0.1, 5, 0.05, 'chip lifetime');
-    R(mist, c, 'shardGravity', -40, 0, 0.1, 'chip gravity');
-    R(mist, c, 'sparkleRate', 0, 600, 1, 'glitter rate');
-    R(mist, c, 'sparkleSize', 0.005, 0.4, 0.005, 'glitter size');
-    R(mist, c, 'sparkleSpeed', 0, 12, 0.05, 'glitter speed');
-    R(mist, c, 'sparkleLifetime', 0.2, 8, 0.05, 'glitter lifetime');
-    R(mist, c, 'sparkleRise', -2, 8, 0.05, 'glitter rise');
-    R(mist, c, 'sparkleTurbulence', 0, 3, 0.01, 'glitter turbulence');
-    Editor.gradient(mist, c, 'colorMist', 'Mist colour');
-    Editor.gradient(mist, c, 'colorShard', 'Chip colour');
-    Editor.gradient(mist, c, 'colorSparkle', 'Glitter colour');
-
-    const impact = folder.addFolder('Impact');
-    R(impact, c, 'burstSize', 0.2, 14, 0.05, 'burst size');
-    R(impact, c, 'burstIntensity', 0, 4, 0.01, 'burst intensity');
-    R(impact, c, 'burstShards', 0, 400, 1, 'burst chips');
-    R(impact, c, 'impactShake', 0, 3, 0.01, 'shake');
-    R(impact, c, 'shakeDuration', 0.1, 4, 0.01, 'shake duration');
-    R(impact, c, 'impactFlash', 0, 2, 0.01, 'screen flash');
-    R(impact, c, 'rumble', 0, 0.5, 0.005, 'travel rumble');
-    impact.addColor(c, 'colorBurstA').name('vapour shell');
-    impact.addColor(c, 'colorBurstB').name('shell body');
-    impact.addColor(c, 'colorBurstC').name('plates & rim');
-    impact.addColor(c, 'colorFlash').name('screen flash colour');
-
-    const light = folder.addFolder('Dynamic light');
-    R(light, c, 'lightIntensity', 0, 80, 0.1, 'light intensity');
-    R(light, c, 'lightRadius', 0.5, 40, 0.1, 'light radius');
-    light.addColor(c, 'lightColor').name('light colour');
-
-    this.iceFolder = folder;
-  }
-
-  /* ------------------------------------------------------------------ */
-
-  /**
-   * Storm Lance.
-   *
-   * Every control here is read by the vertex shader on the frame it changes, so
-   * the whole folder reshapes a bolt that is already in the air. The ones worth
-   * reaching for first are `jitter` and `jitterScale` (how violently it kinks),
-   * `strands` and `spread` (how wide the bundle reads) and `restrike` (how hard
-   * it strobes) — those four carry the character of the effect.
-   */
-  _buildThunder() {
-    const folder = this.gui.addFolder('⚡  Storm Lance');
-    const c = settings.thunder;
-    const R = Editor.range;
-
-    const cast = folder.addFolder('The cast');
-    R(cast, c, 'range', 2, 60, 0.1, 'max range');
-    R(cast, c, 'minRange', 0, 10, 0.1, 'min range');
-    R(cast, c, 'speed', 5, 400, 1, 'strike speed');
-    R(cast, c, 'lifetime', 0.05, 6, 0.01, 'bolt lifetime');
-    R(cast, c, 'fadeTime', 0.05, 4, 0.01, 'blow-out time');
-    R(cast, c, 'cooldown', 0, 6, 0.05, 'cooldown');
-    Editor.castAnimation(cast, c);
-
-    const anchor = folder.addFolder('Where it leaves the hand');
-    R(anchor, c, 'handHeight', 0, 3, 0.01, 'hand height');
-    R(anchor, c, 'handForward', -1, 3, 0.01, 'hand forward');
-    R(anchor, c, 'handSide', -1.5, 1.5, 0.01, 'hand lateral');
-    R(anchor, c, 'endHeight', 0, 4, 0.01, 'height at target');
-    R(anchor, c, 'sag', -3, 3, 0.01, 'mid-span bow');
-
-    const bundle = folder.addFolder('The bundle');
-    R(bundle, c, 'strands', 1, 24, 1, 'filaments');
-    R(bundle, c, 'spread', 0, 5, 0.01, 'fan at target');
-    R(bundle, c, 'spreadNear', 0, 2, 0.01, 'fan at hand');
-    R(bundle, c, 'spreadCurve', 0.2, 5, 0.01, 'fan curve');
-    R(bundle, c, 'twist', -4, 4, 0.01, 'twist over length');
-    R(bundle, c, 'twistSpeed', -6, 6, 0.01, 'twist speed');
-    R(bundle, c, 'branchDim', 0, 1, 0.01, 'outer filament dim');
-
-    const shape = folder.addFolder('The filament');
-    R(shape, c, 'jitter', 0, 3, 0.01, 'kink amplitude');
-    R(shape, c, 'jitterScale', 0.05, 6, 0.01, 'kinks / metre');
-    R(shape, c, 'octaves', 1, 5, 1, 'octaves');
-    R(shape, c, 'jitterFalloff', 0.1, 0.95, 0.01, 'octave falloff');
-    R(shape, c, 'crawl', -20, 20, 0.1, 'kink crawl');
-    R(shape, c, 'pinch', 0.01, 0.5, 0.005, 'end pinch');
-    R(shape, c, 'converge', 0, 1, 0.01, 'lock onto target');
-
-    const ribbon = folder.addFolder('The ribbon');
-    R(ribbon, c, 'width', 0.005, 0.6, 0.005, 'width at hand');
-    R(ribbon, c, 'widthTip', 0.02, 3, 0.01, 'width at target');
-    R(ribbon, c, 'widthCurve', 0.1, 4, 0.01, 'taper curve');
-    R(ribbon, c, 'coreWidth', 1, 6, 0.01, 'spine thickness');
-    R(ribbon, c, 'coreSharp', 0.5, 12, 0.05, 'core sharpness');
-    R(ribbon, c, 'glowWidth', 1, 30, 0.1, 'halo width');
-    R(ribbon, c, 'glowFalloff', 0.2, 8, 0.05, 'halo falloff');
-    R(ribbon, c, 'glowOpacity', 0, 2, 0.01, 'halo opacity');
-    R(ribbon, c, 'softFade', 0.02, 3, 0.01, 'soft intersection');
-
-    const strobe = folder.addFolder('Flicker & restrike');
-    R(strobe, c, 'restrike', 0.5, 90, 0.5, 'restrikes / sec');
-    R(strobe, c, 'flicker', 0, 1, 0.01, 'brightness stutter');
-    R(strobe, c, 'flickerSpeed', 1, 120, 1, 'stutter rate');
-    R(strobe, c, 'strandFlash', 0, 1, 0.01, 'filament blink');
-    R(strobe, c, 'tipGlow', 0, 8, 0.05, 'leading-edge glow');
-    R(strobe, c, 'tipLength', 0.005, 0.5, 0.005, 'leading-edge length');
-
-    const material = folder.addFolder('Bolt colour');
-    material.addColor(c, 'colorCore').name('core');
-    material.addColor(c, 'colorInner').name('inner');
-    material.addColor(c, 'colorOuter').name('outer');
-    material.addColor(c, 'colorHalo').name('halo');
-    R(material, c, 'glow', 0, 8, 0.01, 'glow');
-    R(material, c, 'opacity', 0, 2, 0.01, 'opacity');
-
-    const ground = folder.addFolder('Burns on the ground');
-    R(ground, c, 'arcRate', 0.05, 8, 0.05, 'burns / metre');
-    R(ground, c, 'arcRadius', 0.1, 8, 0.05, 'burn radius');
-    R(ground, c, 'arcLife', 0.05, 5, 0.05, 'burn lifetime');
-    R(ground, c, 'arcIntensity', 0, 3, 0.01, 'burn intensity');
-    R(ground, c, 'arcBranches', 0, 3, 0.01, 'branch detail');
-    R(ground, c, 'scorchRadius', 0.05, 4, 0.05, 'scorch radius');
-    R(ground, c, 'scorchLife', 0.5, 20, 0.1, 'scorch lifetime');
-    R(ground, c, 'scorchIntensity', 0, 2, 0.01, 'scorch intensity');
-    R(ground, c, 'shockRadius', 0.5, 25, 0.1, 'shockwave radius');
-    ground.addColor(c, 'colorArc').name('burn');
-    ground.addColor(c, 'colorEmber').name('ember');
-    ground.addColor(c, 'colorScorch').name('scorch');
-    ground.addColor(c, 'colorShockA').name('shockwave ring');
-    ground.addColor(c, 'colorShockB').name('shockwave crest');
-
-    const sparks = folder.addFolder('Sparks & motes');
-    R(sparks, c, 'sparkRate', 0, 1200, 1, 'spark rate');
-    R(sparks, c, 'sparkSize', 0.005, 0.8, 0.005, 'spark size');
-    R(sparks, c, 'sparkSpeed', 0, 40, 0.1, 'spark speed');
-    R(sparks, c, 'sparkLifetime', 0.05, 4, 0.01, 'spark lifetime');
-    R(sparks, c, 'sparkGravity', -50, 5, 0.1, 'spark gravity');
-    R(sparks, c, 'sparkStretch', 0, 3, 0.01, 'spark stretch');
-    R(sparks, c, 'moteRate', 0, 600, 1, 'mote rate');
-    R(sparks, c, 'moteSize', 0.005, 0.4, 0.005, 'mote size');
-    R(sparks, c, 'moteSpeed', 0, 12, 0.05, 'mote speed');
-    R(sparks, c, 'moteLifetime', 0.1, 8, 0.05, 'mote lifetime');
-    R(sparks, c, 'moteRise', -3, 8, 0.05, 'mote rise');
-    R(sparks, c, 'moteTurbulence', 0, 3, 0.01, 'mote turbulence');
-    Editor.gradient(sparks, c, 'colorSpark', 'Spark colour');
-    Editor.gradient(sparks, c, 'colorMote', 'Mote colour');
-
-    const dust = folder.addFolder('Smoke & debris');
-    R(dust, c, 'smokeRate', 0, 500, 1, 'smoke rate');
-    R(dust, c, 'smokeSize', 0.05, 4, 0.01, 'smoke size');
-    R(dust, c, 'smokeSpeed', 0, 8, 0.05, 'smoke speed');
-    R(dust, c, 'smokeLifetime', 0.2, 8, 0.05, 'smoke lifetime');
-    R(dust, c, 'smokeOpacity', 0, 1, 0.005, 'smoke opacity');
-    R(dust, c, 'smokeRise', -2, 4, 0.01, 'smoke rise');
-    R(dust, c, 'debrisRate', 0, 300, 1, 'debris rate');
-    R(dust, c, 'debrisSize', 0.005, 0.4, 0.005, 'debris size');
-    R(dust, c, 'debrisSpeed', 0, 25, 0.1, 'debris speed');
-    R(dust, c, 'debrisLifetime', 0.1, 5, 0.05, 'debris lifetime');
-    R(dust, c, 'debrisGravity', -50, 0, 0.1, 'debris gravity');
-    Editor.gradient(dust, c, 'colorSmoke', 'Smoke colour');
-    Editor.gradient(dust, c, 'colorDebris', 'Debris colour');
-
-    const impact = folder.addFolder('Muzzle & impact');
-    R(impact, c, 'muzzleSize', 0.05, 6, 0.05, 'muzzle size');
-    R(impact, c, 'muzzleIntensity', 0, 5, 0.01, 'muzzle intensity');
-    R(impact, c, 'castFlash', 0, 2, 0.01, 'flash on release');
-    impact.addColor(c, 'colorMuzzleA').name('muzzle shell');
-    impact.addColor(c, 'colorMuzzleB').name('muzzle body');
-    impact.addColor(c, 'colorMuzzleC').name('muzzle arcs');
-    impact.addColor(c, 'colorCastFlash').name('release flash colour');
-    R(impact, c, 'burstSize', 0.2, 14, 0.05, 'burst size');
-    R(impact, c, 'burstIntensity', 0, 5, 0.01, 'burst intensity');
-    R(impact, c, 'burstSparks', 0, 600, 1, 'burst sparks');
-    R(impact, c, 'burstDebris', 0, 300, 1, 'burst debris');
-    R(impact, c, 'impactShake', 0, 3, 0.01, 'shake');
-    R(impact, c, 'shakeDuration', 0.1, 4, 0.01, 'shake duration');
-    R(impact, c, 'impactFlash', 0, 2, 0.01, 'screen flash');
-    R(impact, c, 'rumble', 0, 0.5, 0.005, 'travel rumble');
-    impact.addColor(c, 'colorBurstA').name('burst shell');
-    impact.addColor(c, 'colorBurstB').name('burst body');
-    impact.addColor(c, 'colorBurstC').name('burst arcs');
-    impact.addColor(c, 'colorFlash').name('impact flash colour');
-
-    const light = folder.addFolder('Dynamic light');
-    R(light, c, 'lightIntensity', 0, 120, 0.5, 'light intensity');
-    R(light, c, 'lightRadius', 0.5, 50, 0.1, 'light radius');
-    R(light, c, 'lightFlicker', 0, 1, 0.01, 'light gutter');
-    R(light, c, 'lightFlickerSpeed', 1, 90, 1, 'gutter rate');
-    light.addColor(c, 'lightColor').name('light colour');
-
-    this.thunderFolder = folder;
-  }
-
-  /* ------------------------------------------------------------------ */
-
-  /**
-   * Cinder Fall.
-   *
-   * The seven controls under "The rock" regenerate real geometry — see
-   * `MeteorAbility#_syncGeometry` — and everything else is read by a shader or
-   * resolved from scratch on the frame it changes, so the whole folder reshapes
-   * a meteor that is already in the air. The ones worth reaching for first are
-   * `arc` (how hard it is lobbed), `crackWidth` and `chargeCurve` (how the lava
-   * seams open on the way in), `trailSpan` and `trailWidth` (how much fire
-   * streams off it) and `chunkSpeed` (how far the wreckage is thrown).
-   */
-  _buildMeteor() {
-    const folder = this.gui.addFolder('☄  Cinder Fall');
-    const c = settings.meteor;
-    const R = Editor.range;
-
-    const cast = folder.addFolder('The cast');
-    R(cast, c, 'range', 2, 60, 0.1, 'max range');
-    R(cast, c, 'minRange', 0, 10, 0.1, 'min range');
-    R(cast, c, 'speed', 3, 90, 0.5, 'travel speed');
-    R(cast, c, 'lifetime', 0.2, 10, 0.1, 'crater lifetime');
-    R(cast, c, 'fadeTime', 0.1, 6, 0.05, 'clear-out time');
-    R(cast, c, 'cooldown', 0, 6, 0.05, 'cooldown');
-    Editor.castAnimation(cast, c);
-
-    const path = folder.addFolder('The flight path');
-    R(path, c, 'handHeight', 0, 3, 0.01, 'hand height');
-    R(path, c, 'handForward', -1, 3, 0.01, 'hand forward');
-    R(path, c, 'handSide', -1.5, 1.5, 0.01, 'hand lateral');
-    R(path, c, 'endHeight', 0, 4, 0.01, 'height at target');
-    R(path, c, 'arc', -4, 12, 0.05, 'lob height');
-    R(path, c, 'arcCurve', 0.1, 4, 0.01, 'lob curve');
-
-    // Everything down to `craterSize` rebuilds the asteroid geometry. `cuts` is
-    // the one that decides whether it reads as stone: it slices flat fracture
-    // faces off the ball, which no amount of noise can fake.
-    const rock = folder.addFolder('The rock');
-    R(rock, c, 'radius', 0.05, 3, 0.01, 'radius');
-    R(rock, c, 'facets', 0, 3, 1, 'subdivisions');
-    R(rock, c, 'lumpiness', 0, 0.8, 0.01, 'lumpiness');
-    R(rock, c, 'lumpScale', 0.2, 6, 0.05, 'lumps / radius');
-    R(rock, c, 'surfaceRoughness', 0, 1, 0.01, 'surface roughness');
-    R(rock, c, 'cuts', 0, 16, 1, 'fracture faces');
-    R(rock, c, 'cutDepth', 0, 0.5, 0.01, 'fracture depth');
-    R(rock, c, 'craters', 0, 14, 1, 'craters');
-    R(rock, c, 'craterDepth', 0, 0.6, 0.01, 'crater depth');
-    R(rock, c, 'craterSize', 0.05, 1.4, 0.01, 'crater size');
-    R(rock, c, 'spin', -20, 20, 0.1, 'tumble rate');
-
-    const seams = folder.addFolder('Lava seams');
-    R(seams, c, 'chargeCurve', 0.1, 5, 0.01, 'heat-up curve');
-    R(seams, c, 'crackScale', 0.3, 10, 0.05, 'seams / radius');
-    R(seams, c, 'crackWidth', 0.005, 0.5, 0.005, 'seam width');
-    R(seams, c, 'crackBranches', 0, 1.5, 0.01, 'branch seams');
-    R(seams, c, 'crackGlow', 0, 10, 0.05, 'seam glow');
-    R(seams, c, 'crackFlow', 0, 1, 0.01, 'magma crawl');
-    R(seams, c, 'crackFlowSpeed', 0, 5, 0.01, 'crawl speed');
-    R(seams, c, 'rockScale', 0.2, 10, 0.05, 'rock mottling');
-    R(seams, c, 'facetTint', 0, 1.2, 0.01, 'per-facet tint');
-    R(seams, c, 'cavity', 0, 1, 0.01, 'cavity shading');
-    R(seams, c, 'soot', 0, 1.5, 0.01, 'soot around seams');
-    R(seams, c, 'rimHeat', 0, 4, 0.01, 'heat sheath');
-    R(seams, c, 'leadGlow', 0, 6, 0.01, 'leading-face heat');
-    R(seams, c, 'leadSharp', 0.5, 8, 0.05, 'leading-face falloff');
-    R(seams, c, 'glow', 0, 4, 0.01, 'glow');
-    R(seams, c, 'envIntensity', 0, 3, 0.01, 'reflection');
-    seams.addColor(c, 'colorRock').name('rock');
-    seams.addColor(c, 'colorChar').name('char');
-    seams.addColor(c, 'colorCrack').name('seam');
-    seams.addColor(c, 'colorHot').name('white hot');
-
-    // The trail is a raymarched volume, so these are volume parameters, not
-    // surface ones — see `materials/VolumetricFireMaterial.js`. `trailWidth`,
-    // `trailPlume` and `trailSpan` set its shape; `trailSteps` is the cost dial.
-    const trail = folder.addFolder('The fire trail');
-    R(trail, c, 'trailSpan', 0.5, 30, 0.1, 'trail length');
-    R(trail, c, 'trailWidth', 0.02, 2, 0.01, 'tube radius');
-    R(trail, c, 'trailHeadSize', 0.5, 5, 0.01, 'head size');
-    R(trail, c, 'trailPlume', 0.3, 4, 0.01, 'upward stretch');
-    R(trail, c, 'trailWakeSpread', 0, 3, 0.01, 'wake spread');
-    R(trail, c, 'trailRise', 0, 3, 0.01, 'wake rise');
-    R(trail, c, 'trailDetachment', 0, 1.5, 0.01, 'tail break-up');
-    R(trail, c, 'trailSoftness', 0.05, 1, 0.01, 'surface softness');
-    R(trail, c, 'trailBurnout', 0.05, 4, 0.05, 'burn-out time');
-    R(trail, c, 'trailTailFade', 0.01, 0.8, 0.01, 'tail burn-out');
-
-    // Metre-scale lobes. Without these the outline stays a capsule no matter how
-    // much fine turbulence is piled on top of it.
-    const silhouette = trail.addFolder('Silhouette');
-    R(silhouette, c, 'trailBulge', 0, 1, 0.01, 'lobe depth');
-    R(silhouette, c, 'trailBulgeScale', 0.05, 2, 0.01, 'lobes / metre');
-    R(silhouette, c, 'trailShred', 0, 4, 0.01, 'fringe shred');
-    R(silhouette, c, 'trailWisps', 0, 2, 0.01, 'wisps');
-    R(silhouette, c, 'trailLick', 0, 8, 0.05, 'radial shear');
-
-    const motion = trail.addFolder('Motion & turbulence');
-    R(motion, c, 'trailSpeed', 0, 12, 0.01, 'flow speed');
-    R(motion, c, 'trailBuoyancy', 0, 10, 0.01, 'buoyancy');
-    R(motion, c, 'trailTurbulence', 0, 8, 0.01, 'turbulence');
-    R(motion, c, 'trailNoiseStrength', 0, 4, 0.01, 'noise strength');
-    R(motion, c, 'trailNoiseFrequency', 0.1, 10, 0.01, 'noise frequency');
-    R(motion, c, 'trailWarp', 0, 1.5, 0.01, 'domain warp');
-    R(motion, c, 'trailCurl', 0, 3, 0.01, 'axial swirl');
-    R(motion, c, 'trailVortex', 0, 2, 0.01, 'vortex roll-up');
-    R(motion, c, 'trailRingFrequency', 0, 3, 0.01, 'rings / metre');
-    R(motion, c, 'trailRingSpeed', 0, 10, 0.05, 'ring speed');
-    R(motion, c, 'trailTongue', 0.2, 3, 0.01, 'tongue stretch');
-    R(motion, c, 'trailStreamStretch', 0.2, 3, 0.01, 'streamwise stretch');
-    R(motion, c, 'trailFlicker', 0, 2, 0.01, 'flicker');
-    R(motion, c, 'trailOctaves', 1, 5, 1, 'detail octaves');
-
-    // The flame is shaded as a Planckian radiator: colour comes out of the
-    // temperature. `trailPalette` blends toward the hand-authored stops instead.
-    const heat = trail.addFolder('Temperature & radiance');
-    R(heat, c, 'trailTempCore', 1000, 5000, 10, 'core temperature (K)');
-    R(heat, c, 'trailTempEdge', 1000, 4000, 10, 'edge temperature (K)');
-    R(heat, c, 'trailEmissionCurve', 1, 6, 0.01, 'radiance exponent');
-    R(heat, c, 'trailHeatFocus', 0.05, 3, 0.01, 'heat focus');
-    R(heat, c, 'trailHeatFalloff', 0.05, 4, 0.01, 'heat falloff');
-    R(heat, c, 'trailHeatFollow', 0, 1, 0.01, 'heat follows noise');
-    R(heat, c, 'trailTailHeat', 0, 1, 0.01, 'spent-gas heat');
-    R(heat, c, 'trailScatter', 0, 4, 0.01, 'scatter');
-    R(heat, c, 'trailScatterFalloff', 0.2, 8, 0.05, 'scatter falloff');
-    R(heat, c, 'trailPalette', 0, 1, 0.01, 'palette vs physics');
-    heat.addColor(c, 'colorFlameMid').name('flame mid');
-    heat.addColor(c, 'colorFlameEdge').name('flame edge');
-    heat.addColor(c, 'colorFlameSmoke').name('flame smoke');
-
-    const march = trail.addFolder('Volume rendering');
-    R(march, c, 'trailDensity', 0, 6, 0.01, 'density');
-    R(march, c, 'trailSoot', 0, 5, 0.01, 'soot absorption');
-    R(march, c, 'trailCoreClarity', 0, 1, 0.01, 'core clarity');
-    R(march, c, 'trailGlow', 0, 8, 0.01, 'glow');
-    R(march, c, 'trailOpacity', 0, 2, 0.01, 'opacity');
-    R(march, c, 'trailSteps', 6, 72, 1, 'raymarch steps');
-
-    const chunks = folder.addFolder('The wreckage');
-    R(chunks, c, 'chunkCount', 0, 28, 1, 'chunks');
-    R(chunks, c, 'chunkScale', 0.05, 0.8, 0.01, 'chunk size');
-    R(chunks, c, 'chunkSpeed', 0, 30, 0.1, 'throw speed');
-    R(chunks, c, 'chunkForward', 0, 2, 0.01, 'downrange bias');
-    R(chunks, c, 'chunkLoft', 0, 1.5, 0.01, 'loft');
-    R(chunks, c, 'chunkGravity', -50, -1, 0.1, 'gravity');
-    R(chunks, c, 'chunkSpin', 0, 20, 0.1, 'tumble rate');
-    R(chunks, c, 'chunkCool', 0.1, 8, 0.05, 'cool-down time');
-    R(chunks, c, 'chunkLinger', 0, 4, 0.05, 'hold before sinking');
-    R(chunks, c, 'chunkSink', 0.1, 4, 0.05, 'sink time');
-
-    const embers = folder.addFolder('Embers & sparks');
-    R(embers, c, 'emberRate', 0, 900, 1, 'ember rate');
-    R(embers, c, 'emberSize', 0.005, 0.5, 0.005, 'ember size');
-    R(embers, c, 'emberSpeed', 0, 15, 0.05, 'ember speed');
-    R(embers, c, 'emberLifetime', 0.1, 8, 0.05, 'ember lifetime');
-    R(embers, c, 'emberRise', -3, 8, 0.05, 'ember rise');
-    R(embers, c, 'emberGlow', 0, 4, 0.01, 'ember glow');
-    R(embers, c, 'emberTurbulence', 0, 3, 0.01, 'ember turbulence');
-    R(embers, c, 'sparkRate', 0, 900, 1, 'spark rate');
-    R(embers, c, 'sparkSize', 0.005, 0.8, 0.005, 'spark size');
-    R(embers, c, 'sparkSpeed', 0, 40, 0.1, 'spark speed');
-    R(embers, c, 'sparkLifetime', 0.05, 4, 0.01, 'spark lifetime');
-    R(embers, c, 'sparkGravity', -50, 5, 0.1, 'spark gravity');
-    R(embers, c, 'sparkStretch', 0, 3, 0.01, 'spark stretch');
-    Editor.gradient(embers, c, 'colorEmber', 'Ember colour');
-    Editor.gradient(embers, c, 'colorSpark', 'Spark colour');
-
-    const dust = folder.addFolder('Smoke & grit');
-    R(dust, c, 'smokeRate', 0, 500, 1, 'smoke rate');
-    R(dust, c, 'smokeSize', 0.05, 4, 0.01, 'smoke size');
-    R(dust, c, 'smokeSpeed', 0, 8, 0.05, 'smoke speed');
-    R(dust, c, 'smokeLifetime', 0.2, 10, 0.05, 'smoke lifetime');
-    R(dust, c, 'smokeOpacity', 0, 1, 0.005, 'smoke opacity');
-    R(dust, c, 'smokeRise', -2, 5, 0.01, 'smoke rise');
-    R(dust, c, 'debrisSize', 0.005, 0.4, 0.005, 'grit size');
-    R(dust, c, 'debrisSpeed', 0, 25, 0.1, 'grit speed');
-    R(dust, c, 'debrisLifetime', 0.1, 5, 0.05, 'grit lifetime');
-    R(dust, c, 'debrisGravity', -50, 0, 0.1, 'grit gravity');
-    Editor.gradient(dust, c, 'colorSmoke', 'Smoke colour');
-    Editor.gradient(dust, c, 'colorDebris', 'Grit colour');
-
-    const cracks = folder.addFolder('Molten cracks');
-    R(cracks, c, 'fissureRadius', 0.5, 16, 0.05, 'reach');
-    R(cracks, c, 'fissureLife', 0.5, 25, 0.1, 'lifetime');
-    R(cracks, c, 'fissureArms', 2, 12, 1, 'main cracks');
-    R(cracks, c, 'fissureWander', 0, 6, 0.05, 'meander');
-    R(cracks, c, 'fissureBranches', 0, 1, 0.01, 'branch density');
-    R(cracks, c, 'fissureBranchLength', 0, 1, 0.01, 'branch length');
-    R(cracks, c, 'fissureWidth', 0.01, 1, 0.005, 'seam width');
-    R(cracks, c, 'fissureHeat', 0, 4, 0.01, 'core heat');
-    R(cracks, c, 'fissurePulse', 0, 5, 0.01, 'heat-wave speed');
-    R(cracks, c, 'fissureGrowth', 0.5, 40, 0.1, 'spread speed');
-    R(cracks, c, 'fissureRockSize', 0, 1.2, 0.01, 'lip rubble size');
-
-    const ground = folder.addFolder('The crater');
-    R(ground, c, 'scorchRadius', 0.2, 12, 0.05, 'scorch radius');
-    R(ground, c, 'scorchLife', 0.5, 20, 0.1, 'scorch lifetime');
-    R(ground, c, 'scorchIntensity', 0, 2, 0.01, 'scorch intensity');
-    R(ground, c, 'shockRadius', 0.5, 25, 0.1, 'shockwave radius');
-    ground.addColor(c, 'colorScorch').name('scorch');
-    ground.addColor(c, 'colorShockA').name('shockwave ring');
-    ground.addColor(c, 'colorShockB').name('shockwave crest');
-
-    const impact = folder.addFolder('Launch & detonation');
-    R(impact, c, 'muzzleSize', 0, 6, 0.05, 'launch flare'); // 0 = no flare
-    R(impact, c, 'muzzleIntensity', 0, 5, 0.01, 'launch intensity');
-    R(impact, c, 'castFlash', 0, 2, 0.01, 'flash on release');
-    impact.addColor(c, 'colorCastFlash').name('release flash colour');
-    R(impact, c, 'burstSize', 0.2, 18, 0.05, 'fireball size');
-    R(impact, c, 'burstIntensity', 0, 5, 0.01, 'fireball intensity');
-    R(impact, c, 'burstTurbulence', 0, 4, 0.01, 'fireball turbulence');
-    R(impact, c, 'burstEmbers', 0, 800, 1, 'burst embers');
-    R(impact, c, 'burstSparks', 0, 600, 1, 'burst sparks');
-    R(impact, c, 'burstDebris', 0, 400, 1, 'burst grit');
-    R(impact, c, 'burstSmoke', 0, 300, 1, 'burst smoke');
-    R(impact, c, 'impactShake', 0, 3, 0.01, 'shake');
-    R(impact, c, 'shakeDuration', 0.1, 4, 0.01, 'shake duration');
-    R(impact, c, 'impactFlash', 0, 2, 0.01, 'screen flash');
-    R(impact, c, 'rumble', 0, 0.5, 0.005, 'travel rumble');
-    impact.addColor(c, 'colorFlash').name('impact flash colour');
-
-    const light = folder.addFolder('Dynamic light');
-    R(light, c, 'lightIntensity', 0, 120, 0.5, 'light intensity');
-    R(light, c, 'lightRadius', 0.5, 50, 0.1, 'light radius');
-    R(light, c, 'lightFlicker', 0, 1, 0.01, 'light gutter');
-    R(light, c, 'lightFlickerSpeed', 1, 60, 0.5, 'gutter rate');
-    light.addColor(c, 'lightColor').name('light colour');
-
-    this.meteorFolder = folder;
-  }
-
-  /* ------------------------------------------------------------------ */
-
-  /**
-   * Nova Beam.
-   *
-   * Every control here is read by a shader on the frame it changes, so the whole
-   * folder reshapes a beam that is already burning — pause with **P** halfway
-   * through the hold and the entire panel stays live. The ones worth reaching
-   * for first are `radius` and `flare` (how heavy the column reads), `charge`
-   * and `lifetime` (the wind-up and the hold, which are what make this ability
-   * different from the other three), `coils` / `coilTurns` (the ribbons around
-   * it) and `streak` / `flowSpeed` (how hard the energy streams downrange).
-   */
-  _buildBeam() {
-    const folder = this.gui.addFolder('✦  Nova Beam');
-    const c = settings.beam;
-    const R = Editor.range;
-
-    const cast = folder.addFolder('The cast');
-    R(cast, c, 'range', 2, 60, 0.1, 'max range');
-    R(cast, c, 'minRange', 0, 10, 0.1, 'min range');
-    R(cast, c, 'charge', 0, 3, 0.01, 'wind-up time');
-    R(cast, c, 'speed', 5, 400, 1, 'travel speed');
-    R(cast, c, 'lifetime', 0.05, 8, 0.01, 'burn time');
-    R(cast, c, 'fadeTime', 0.05, 4, 0.01, 'collapse time');
-    R(cast, c, 'cooldown', 0, 6, 0.05, 'cooldown');
-    Editor.castAnimation(cast, c);
-
-    const anchor = folder.addFolder('Where it leaves the hands');
-    R(anchor, c, 'handHeight', 0, 3, 0.01, 'hand height');
-    R(anchor, c, 'handForward', -1, 3, 0.01, 'hand forward');
-    R(anchor, c, 'handSide', -1.5, 1.5, 0.01, 'hand lateral');
-    R(anchor, c, 'endHeight', 0, 4, 0.01, 'height at target');
-
-    const column = folder.addFolder('The column');
-    R(column, c, 'radiusNear', 0.01, 3, 0.01, 'radius at hands');
-    R(column, c, 'radius', 0.02, 5, 0.01, 'radius at target');
-    R(column, c, 'radiusCurve', 0.1, 4, 0.01, 'radius curve');
-    R(column, c, 'flare', 0, 4, 0.01, 'flare at target');
-    R(column, c, 'flareWidth', 0.02, 1, 0.01, 'flare width');
-    R(column, c, 'throb', 0, 0.6, 0.005, 'pressure waves');
-    R(column, c, 'throbScale', 0, 12, 0.1, 'waves / length');
-    R(column, c, 'throbSpeed', 0, 10, 0.05, 'wave speed');
-    R(column, c, 'wander', 0, 1, 0.005, 'axis drift');
-    R(column, c, 'wanderScale', 0.1, 6, 0.05, 'drift scale');
-    R(column, c, 'wanderSpeed', 0, 5, 0.01, 'drift speed');
-
-    // The three tube passes. `coreSharp` and `shellRim` are the pair that decide
-    // whether the beam reads as a solid rod or as a lit pipe — see
-    // `materials/BeamMaterial.js`.
-    const layers = folder.addFolder('Core, sheath & halo');
-    R(layers, c, 'coreWidth', 0.05, 1.5, 0.01, 'core width');
-    R(layers, c, 'coreSharp', 0.1, 8, 0.05, 'core focus');
-    R(layers, c, 'coreFill', 0, 3, 0.01, 'core fill');
-    R(layers, c, 'shellWidth', 0.2, 3, 0.01, 'sheath width');
-    R(layers, c, 'shellRim', 0, 3, 0.01, 'sheath rim');
-    R(layers, c, 'shellFill', 0, 1.5, 0.01, 'sheath fill');
-    R(layers, c, 'shellOpacity', 0, 2, 0.01, 'sheath opacity');
-    R(layers, c, 'edgePower', 0.2, 8, 0.05, 'rim falloff');
-    R(layers, c, 'haloWidth', 0.5, 8, 0.05, 'halo width');
-    R(layers, c, 'haloRim', 0.5, 10, 0.05, 'halo falloff');
-    R(layers, c, 'haloOpacity', 0, 2, 0.01, 'halo opacity');
-
-    const surface = folder.addFolder('Surface & flow');
-    R(surface, c, 'ripple', 0, 1, 0.005, 'surface ripple');
-    R(surface, c, 'rippleBands', 0.1, 8, 0.05, 'ripples around');
-    R(surface, c, 'rippleScale', 0.1, 12, 0.05, 'ripples along');
-    R(surface, c, 'rippleSpeed', 0, 12, 0.05, 'ripple crawl');
-    R(surface, c, 'streak', 0, 3, 0.01, 'filaments');
-    R(surface, c, 'streakSharp', 0, 1, 0.01, 'filament sharpness');
-    R(surface, c, 'streakScale', 0.2, 20, 0.1, 'filaments / length');
-    R(surface, c, 'streakBands', 0.2, 10, 0.05, 'filaments around');
-    R(surface, c, 'streakGlow', 0, 4, 0.01, 'filament heat');
-    R(surface, c, 'flowSpeed', 0, 30, 0.1, 'flow speed');
-    R(surface, c, 'mouthGlow', 0, 6, 0.05, 'muzzle heat');
-    R(surface, c, 'mouthLength', 0.005, 0.5, 0.005, 'muzzle length');
-    R(surface, c, 'tipGlow', 0, 6, 0.05, 'burning-end heat');
-    R(surface, c, 'tipLength', 0.005, 0.5, 0.005, 'burning-end length');
-    R(surface, c, 'softFade', 0.02, 3, 0.01, 'soft intersection');
-
-    const material = folder.addFolder('Beam colour');
-    material.addColor(c, 'colorCore').name('axis');
-    material.addColor(c, 'colorInner').name('inner');
-    material.addColor(c, 'colorOuter').name('sheath');
-    material.addColor(c, 'colorHalo').name('halo');
-    R(material, c, 'glow', 0, 8, 0.01, 'glow');
-    R(material, c, 'opacity', 0, 2, 0.01, 'opacity');
-
-    const coils = folder.addFolder('The coils');
-    R(coils, c, 'coils', 0, 8, 1, 'ribbons');
-    R(coils, c, 'coilTurns', -8, 8, 0.05, 'turns over length');
-    R(coils, c, 'coilSpeed', -6, 6, 0.01, 'roll speed');
-    R(coils, c, 'coilRadius', 0.2, 4, 0.01, 'ride radius');
-    R(coils, c, 'coilFlare', 0, 4, 0.01, 'flare at target');
-    R(coils, c, 'coilWidth', 0.005, 0.6, 0.005, 'width at hands');
-    R(coils, c, 'coilWidthTip', 0.05, 6, 0.01, 'width at target');
-    R(coils, c, 'coilSharp', 0.2, 8, 0.05, 'edge falloff');
-    R(coils, c, 'coilPulse', 0, 1, 0.01, 'charge pulse');
-    R(coils, c, 'coilPulseFreq', 0, 12, 0.05, 'pulses / length');
-    R(coils, c, 'coilPulseSpeed', -8, 8, 0.05, 'pulse speed');
-    // Headroom above the shipped values on purpose — they sit high, and a
-    // control that starts pinned to its own maximum can only ever come down.
-    R(coils, c, 'coilGlow', 0, 14, 0.01, 'glow');
-    R(coils, c, 'coilOpacity', 0, 3, 0.01, 'opacity');
-    coils.addColor(c, 'colorCoil').name('ribbon core');
-    coils.addColor(c, 'colorCoilEdge').name('ribbon edge');
-
-    const rings = folder.addFolder('Shock discs');
-    R(rings, c, 'rings', 0, 12, 1, 'discs');
-    R(rings, c, 'ringSpeed', 0, 6, 0.01, 'trips / second');
-    R(rings, c, 'ringInner', 0.2, 4, 0.01, 'inner lip');
-    R(rings, c, 'ringOuter', 0.3, 6, 0.01, 'outer lip');
-    R(rings, c, 'ringSwell', 0, 3, 0.01, 'swell downrange');
-    R(rings, c, 'ringFade', 0, 1, 0.01, 'fade downrange');
-    R(rings, c, 'ringSharp', 0.2, 8, 0.05, 'band sharpness');
-    R(rings, c, 'ringGlow', 0, 8, 0.01, 'glow');
-    R(rings, c, 'ringOpacity', 0, 2, 0.01, 'opacity');
-    rings.addColor(c, 'colorRing').name('disc colour');
-
-    const orb = folder.addFolder('The charge');
-    R(orb, c, 'orbSize', 0.02, 2, 0.01, 'orb radius');
-    R(orb, c, 'orbThrob', 0, 0.6, 0.005, 'orb pulse');
-    R(orb, c, 'orbThrobSpeed', 0, 20, 0.1, 'pulse rate');
-    R(orb, c, 'orbTurbulence', 0, 1, 0.01, 'surface turbulence');
-    R(orb, c, 'orbScale', 0.2, 8, 0.05, 'surface scale');
-    R(orb, c, 'orbFlow', 0, 5, 0.01, 'surface crawl');
-    R(orb, c, 'orbBands', 0.5, 15, 0.1, 'filament scale');
-    R(orb, c, 'orbRim', 0.2, 6, 0.05, 'rim falloff');
-    R(orb, c, 'orbGlow', 0, 8, 0.01, 'glow');
-    R(orb, c, 'orbOpacity', 0, 2, 0.01, 'opacity');
-    R(orb, c, 'intakeRate', 0, 900, 1, 'intake rate');
-    R(orb, c, 'intakeRadius', 0.2, 8, 0.05, 'intake radius');
-    R(orb, c, 'intakeSpeed', 0.5, 25, 0.1, 'intake speed');
-    R(orb, c, 'chargeShake', 0, 0.5, 0.005, 'wind-up rumble');
-
-    const ground = folder.addFolder('What the floor does');
-    R(ground, c, 'scorchRate', 0.05, 8, 0.05, 'burns / metre');
-    R(ground, c, 'scorchRadius', 0.05, 4, 0.05, 'burn radius');
-    R(ground, c, 'scorchLife', 0.5, 20, 0.1, 'burn lifetime');
-    R(ground, c, 'scorchIntensity', 0, 2, 0.01, 'burn intensity');
-    R(ground, c, 'dustRate', 0, 20, 0.1, 'dust rings / sec');
-    R(ground, c, 'dustRadius', 0.2, 10, 0.05, 'dust ring radius');
-    R(ground, c, 'dustLife', 0.1, 5, 0.05, 'dust ring lifetime');
-    R(ground, c, 'shockRate', 0, 20, 0.1, 'shock rings / sec');
-    R(ground, c, 'shockRadius', 0.5, 25, 0.1, 'shockwave radius');
-    ground.addColor(c, 'colorScorch').name('scorch');
-    ground.addColor(c, 'colorEmber').name('ember');
-    ground.addColor(c, 'colorDustA').name('dust');
-    ground.addColor(c, 'colorDustB').name('dust crest');
-    ground.addColor(c, 'colorShockA').name('shockwave ring');
-    ground.addColor(c, 'colorShockB').name('shockwave crest');
-
-    const sparks = folder.addFolder('Sparks & motes');
-    R(sparks, c, 'sparkRate', 0, 1200, 1, 'spark rate');
-    R(sparks, c, 'sparkSize', 0.005, 0.8, 0.005, 'spark size');
-    R(sparks, c, 'sparkSpeed', 0, 40, 0.1, 'spark speed');
-    R(sparks, c, 'sparkLifetime', 0.05, 4, 0.01, 'spark lifetime');
-    R(sparks, c, 'sparkGravity', -50, 5, 0.1, 'spark gravity');
-    R(sparks, c, 'sparkStretch', 0, 3, 0.01, 'spark stretch');
-    R(sparks, c, 'sparkForward', 0, 4, 0.01, 'downrange drag');
-    R(sparks, c, 'moteRate', 0, 600, 1, 'mote rate');
-    R(sparks, c, 'moteSize', 0.005, 0.4, 0.005, 'mote size');
-    R(sparks, c, 'moteSpeed', 0, 12, 0.05, 'mote speed');
-    R(sparks, c, 'moteLifetime', 0.1, 8, 0.05, 'mote lifetime');
-    R(sparks, c, 'moteRise', -3, 8, 0.05, 'mote rise');
-    R(sparks, c, 'moteTurbulence', 0, 3, 0.01, 'mote turbulence');
-    Editor.gradient(sparks, c, 'colorSpark', 'Spark colour');
-    Editor.gradient(sparks, c, 'colorMote', 'Mote colour');
-
-    const dust = folder.addFolder('Steam & debris');
-    R(dust, c, 'smokeRate', 0, 500, 1, 'steam rate');
-    R(dust, c, 'smokeSize', 0.05, 4, 0.01, 'steam size');
-    R(dust, c, 'smokeSpeed', 0, 8, 0.05, 'steam speed');
-    R(dust, c, 'smokeLifetime', 0.2, 8, 0.05, 'steam lifetime');
-    R(dust, c, 'smokeOpacity', 0, 1, 0.005, 'steam opacity');
-    R(dust, c, 'smokeRise', -2, 4, 0.01, 'steam rise');
-    R(dust, c, 'debrisRate', 0, 300, 1, 'debris rate');
-    R(dust, c, 'debrisSize', 0.005, 0.4, 0.005, 'debris size');
-    R(dust, c, 'debrisSpeed', 0, 25, 0.1, 'debris speed');
-    R(dust, c, 'debrisLifetime', 0.1, 5, 0.05, 'debris lifetime');
-    R(dust, c, 'debrisGravity', -50, 0, 0.1, 'debris gravity');
-    Editor.gradient(dust, c, 'colorSmoke', 'Steam colour');
-    Editor.gradient(dust, c, 'colorDebris', 'Debris colour');
-
-    const impact = folder.addFolder('Release, impact & burn');
-    R(impact, c, 'muzzleSize', 0.05, 8, 0.05, 'release shell');
-    R(impact, c, 'muzzleIntensity', 0, 5, 0.01, 'release intensity');
-    R(impact, c, 'castFlash', 0, 2, 0.01, 'flash on release');
-    impact.addColor(c, 'colorCastFlash').name('release flash colour');
-    R(impact, c, 'burstSize', 0.2, 18, 0.05, 'impact shell');
-    R(impact, c, 'burstIntensity', 0, 5, 0.01, 'impact intensity');
-    R(impact, c, 'burstSparks', 0, 800, 1, 'impact sparks');
-    R(impact, c, 'burstDebris', 0, 400, 1, 'impact debris');
-    R(impact, c, 'pulseRate', 0, 12, 0.1, 'burn shells / sec');
-    R(impact, c, 'pulseSize', 0.1, 10, 0.05, 'burn shell size');
-    R(impact, c, 'pulseIntensity', 0, 5, 0.01, 'burn shell intensity');
-    R(impact, c, 'splashRate', 0, 900, 1, 'back-splash rate');
-    R(impact, c, 'impactShake', 0, 3, 0.01, 'shake');
-    R(impact, c, 'shakeDuration', 0.1, 4, 0.01, 'shake duration');
-    R(impact, c, 'impactFlash', 0, 2, 0.01, 'screen flash');
-    R(impact, c, 'rumble', 0, 0.5, 0.005, 'travel rumble');
-    R(impact, c, 'burnShake', 0, 0.5, 0.005, 'burn rumble');
-    impact.addColor(c, 'colorBurstA').name('impact shell');
-    impact.addColor(c, 'colorBurstB').name('impact body');
-    impact.addColor(c, 'colorBurstC').name('impact arcs');
-    impact.addColor(c, 'colorFlash').name('impact flash colour');
-
-    const light = folder.addFolder('Dynamic light');
-    R(light, c, 'lightIntensity', 0, 120, 0.5, 'beam intensity');
-    R(light, c, 'lightRadius', 0.5, 60, 0.1, 'beam radius');
-    R(light, c, 'lightPulse', 0, 1, 0.01, 'hum depth');
-    R(light, c, 'lightPulseSpeed', 0, 30, 0.1, 'hum rate');
-    R(light, c, 'muzzleLightIntensity', 0, 120, 0.5, 'hand intensity');
-    R(light, c, 'muzzleLightRadius', 0.5, 40, 0.1, 'hand radius');
-    light.addColor(c, 'lightColor').name('light colour');
-
-    this.beamFolder = folder;
-  }
-
-  /* ------------------------------------------------------------------ */
-
-  /**
-   * Voltaic Snare — the first far cast.
-   *
-   * `zoneRadius` is the control that matters most here and the only one that
-   * reaches outside the ability: it is read by the circle indicator *and* by
-   * the tendrils, the rim arcs and the burnt field, so dragging it re-scales
-   * what you aim with and what you get at the same time. After that,
-   * `snapTime` and `height` carry the moment the trap opens, and `tendrils` /
-   * `rimArcs` / `strands` decide how much of the footprint is actually lit.
-   */
-  _buildSnare() {
-    const folder = this.gui.addFolder('◈  Voltaic Snare');
-    const c = settings.snare;
-    const R = Editor.range;
-
-    const cast = folder.addFolder('The cast');
-    R(cast, c, 'zoneRadius', 0.5, 14, 0.05, 'footprint radius');
-    R(cast, c, 'range', 2, 50, 0.1, 'max range');
-    R(cast, c, 'minRange', 0, 10, 0.1, 'min range');
-    R(cast, c, 'speed', 5, 300, 1, 'leash speed');
-    R(cast, c, 'snapTime', 0.02, 1.5, 0.01, 'snap-open time');
-    R(cast, c, 'lifetime', 0.1, 12, 0.05, 'hold time');
-    R(cast, c, 'fadeTime', 0.05, 4, 0.01, 'collapse time');
-    R(cast, c, 'cooldown', 0, 8, 0.05, 'cooldown');
-    Editor.castAnimation(cast, c);
-
-    const leash = folder.addFolder('The leash');
-    R(leash, c, 'handHeight', 0, 3, 0.01, 'hand height');
-    R(leash, c, 'handForward', -1, 3, 0.01, 'hand forward');
-    R(leash, c, 'handSide', -1.5, 1.5, 0.01, 'hand lateral');
-    R(leash, c, 'leashStrands', 0, 6, 1, 'filaments');
-    R(leash, c, 'leashSag', -3, 3, 0.01, 'mid-span bow');
-    R(leash, c, 'leashSpread', 0, 2, 0.01, 'fan');
-    R(leash, c, 'leashCling', 0, 1.5, 0.01, 'height at the tip');
-    R(leash, c, 'leashKink', 0, 2, 0.01, 'kink amplitude');
-    R(leash, c, 'leashWidth', 0.1, 4, 0.01, 'ribbon width');
-
-    const column = folder.addFolder('The column');
-    R(column, c, 'strands', 0, 16, 1, 'filaments');
-    R(column, c, 'height', 0.5, 24, 0.1, 'height');
-    R(column, c, 'heightCurve', 0.1, 4, 0.01, 'climb curve');
-    R(column, c, 'throat', 0.005, 1, 0.005, 'throat, × footprint');
-    R(column, c, 'columnSpread', 0.01, 1, 0.005, 'top, × footprint');
-    R(column, c, 'columnCurve', 0.1, 5, 0.01, 'opening curve');
-    R(column, c, 'columnFlare', 0, 1, 0.005, 'top flare');
-    R(column, c, 'columnTwist', -4, 4, 0.01, 'twist over height');
-    R(column, c, 'columnSpin', -4, 4, 0.01, 'spin');
-    R(column, c, 'columnKink', 0, 2, 0.01, 'kink amplitude');
-    R(column, c, 'columnWidth', 0.1, 6, 0.01, 'ribbon width');
-    R(column, c, 'columnTaper', 0.05, 2, 0.01, 'taper to the top');
-
-    const tendrils = folder.addFolder('The tendrils');
-    R(tendrils, c, 'tendrils', 0, 20, 1, 'tendrils');
-    R(tendrils, c, 'tendrilInner', 0, 1, 0.005, 'start, × footprint');
-    R(tendrils, c, 'tendrilReach', 0.05, 1.6, 0.01, 'end, × footprint');
-    R(tendrils, c, 'tendrilCurve', 0.1, 4, 0.01, 'reach curve');
-    R(tendrils, c, 'tendrilWander', 0, 4, 0.01, 'veer');
-    R(tendrils, c, 'tendrilArch', 0, 3, 0.01, 'hop off the floor');
-    R(tendrils, c, 'tendrilHug', 0.005, 1, 0.005, 'floor clearance');
-    R(tendrils, c, 'tendrilSpin', -2, 2, 0.005, 'fan rotation');
-    R(tendrils, c, 'tendrilKink', 0, 2, 0.01, 'kink amplitude');
-    R(tendrils, c, 'tendrilWidth', 0.05, 4, 0.01, 'ribbon width');
-    R(tendrils, c, 'tendrilDim', 0, 1, 0.01, 'dim vs the column');
-
-    const rim = folder.addFolder('The rim arcs');
-    R(rim, c, 'rimArcs', 0, 14, 1, 'arcs');
-    R(rim, c, 'rimSpan', 0.01, 1, 0.005, 'arc span, × the circle');
-    R(rim, c, 'rimSpeed', -3, 3, 0.01, 'travel speed');
-    R(rim, c, 'rimHeight', 0, 3, 0.01, 'hop height');
-    R(rim, c, 'rimJitter', 0, 1, 0.01, 'radial wobble');
-    R(rim, c, 'rimKink', 0, 2, 0.01, 'kink amplitude');
-    R(rim, c, 'rimWidth', 0.05, 4, 0.01, 'ribbon width');
-    R(rim, c, 'rimDim', 0, 1, 0.01, 'dim vs the column');
-
-    const shape = folder.addFolder('Filaments & flicker');
-    R(shape, c, 'jitter', 0, 4, 0.01, 'kink master');
-    R(shape, c, 'jitterScale', 0.05, 8, 0.01, 'kinks / metre');
-    R(shape, c, 'octaves', 1, 5, 1, 'octaves');
-    R(shape, c, 'jitterFalloff', 0.1, 0.95, 0.01, 'octave falloff');
-    R(shape, c, 'crawl', -20, 20, 0.1, 'kink crawl');
-    R(shape, c, 'pinch', 0.01, 0.5, 0.005, 'end pinch');
-    R(shape, c, 'restrike', 0.5, 90, 0.5, 'restrikes / sec');
-    R(shape, c, 'flicker', 0, 1, 0.01, 'brightness stutter');
-    R(shape, c, 'flickerSpeed', 1, 120, 1, 'stutter rate');
-    R(shape, c, 'strandFlash', 0, 1, 0.01, 'filament blink');
-
-    const ribbon = folder.addFolder('The ribbon & colour');
-    R(ribbon, c, 'width', 0.005, 0.4, 0.001, 'filament width');
-    R(ribbon, c, 'coreSharp', 0.5, 12, 0.05, 'core sharpness');
-    R(ribbon, c, 'glowWidth', 1, 30, 0.1, 'halo width');
-    R(ribbon, c, 'glowFalloff', 0.2, 8, 0.05, 'halo falloff');
-    R(ribbon, c, 'glowOpacity', 0, 2, 0.01, 'halo opacity');
-    R(ribbon, c, 'softFade', 0.02, 3, 0.01, 'soft intersection');
-    R(ribbon, c, 'glow', 0, 8, 0.01, 'glow');
-    R(ribbon, c, 'opacity', 0, 2, 0.01, 'opacity');
-    ribbon.addColor(c, 'colorCore').name('core');
-    ribbon.addColor(c, 'colorInner').name('inner');
-    ribbon.addColor(c, 'colorOuter').name('outer');
-    ribbon.addColor(c, 'colorHalo').name('halo');
-
-    const field = folder.addFolder('The field on the floor');
-    R(field, c, 'fieldBoundary', 0.02, 2, 0.01, 'band thickness');
-    R(field, c, 'fieldBoundaryGlow', 0, 8, 0.05, 'band glow');
-    R(field, c, 'fieldFill', 0, 2, 0.01, 'interior fill');
-    R(field, c, 'fieldFalloff', 0.1, 5, 0.05, 'fill falloff');
-    R(field, c, 'fieldVeins', 0, 3, 0.01, 'burnt veins');
-    R(field, c, 'fieldVeinScale', 0.1, 8, 0.05, 'veins / metre');
-    R(field, c, 'fieldVeinSharp', 0, 1, 0.01, 'vein sharpness');
-    R(field, c, 'fieldWarp', 0, 2, 0.01, 'domain warp');
-    R(field, c, 'fieldCrawl', -4, 4, 0.01, 'vein crawl');
-    R(field, c, 'fieldRings', 0, 12, 0.1, 'pressure rings');
-    R(field, c, 'fieldRingSpeed', -6, 6, 0.01, 'ring speed');
-    R(field, c, 'fieldSpokes', 0, 96, 1, 'boundary ticks');
-    R(field, c, 'fieldSpokeLength', 0.05, 3, 0.01, 'tick length');
-    R(field, c, 'fieldSpin', -2, 2, 0.005, 'tick spin');
-    R(field, c, 'fieldCore', 0, 4, 0.01, 'centre pool');
-    R(field, c, 'fieldCoreSize', 0.02, 1, 0.005, 'pool size, × footprint');
-    R(field, c, 'fieldPulse', 0, 1, 0.01, 'pulse');
-    R(field, c, 'fieldPulseSpeed', 0, 10, 0.05, 'pulse speed');
-    R(field, c, 'fieldOpacity', 0, 2, 0.01, 'opacity');
-    R(field, c, 'fieldHeight', 0.005, 0.4, 0.005, 'hover height');
-    field.addColor(c, 'colorField').name('field');
-    field.addColor(c, 'colorFieldEdge').name('band & pool');
-
-    const ground = folder.addFolder('Burns on the ground');
-    R(ground, c, 'arcRate', 0, 30, 0.1, 'rim burns / sec');
-    R(ground, c, 'arcRadius', 0.1, 8, 0.05, 'burn radius');
-    R(ground, c, 'arcLife', 0.05, 5, 0.05, 'burn lifetime');
-    R(ground, c, 'arcIntensity', 0, 3, 0.01, 'burn intensity');
-    R(ground, c, 'arcBranches', 0, 3, 0.01, 'branch detail');
-    R(ground, c, 'trailRate', 0.05, 8, 0.05, 'leash burns / metre');
-    R(ground, c, 'scorchRadius', 0.05, 8, 0.05, 'scorch radius');
-    R(ground, c, 'scorchLife', 0.5, 20, 0.1, 'scorch lifetime');
-    R(ground, c, 'scorchIntensity', 0, 2, 0.01, 'scorch intensity');
-    R(ground, c, 'shockRadius', 0.5, 25, 0.1, 'shockwave radius');
-    R(ground, c, 'ringRate', 0, 12, 0.1, 'dust rings / sec');
-    ground.addColor(c, 'colorArc').name('burn');
-    ground.addColor(c, 'colorEmber').name('ember');
-    ground.addColor(c, 'colorScorch').name('scorch');
-    ground.addColor(c, 'colorShockA').name('shockwave ring');
-    ground.addColor(c, 'colorShockB').name('shockwave crest');
-
-    const sparks = folder.addFolder('Sparks & updraft');
-    R(sparks, c, 'sparkRate', 0, 1200, 1, 'spark rate');
-    R(sparks, c, 'sparkSize', 0.005, 0.8, 0.005, 'spark size');
-    R(sparks, c, 'sparkSpeed', 0, 40, 0.1, 'spark speed');
-    R(sparks, c, 'sparkLifetime', 0.05, 4, 0.01, 'spark lifetime');
-    R(sparks, c, 'sparkGravity', -50, 5, 0.1, 'spark gravity');
-    R(sparks, c, 'sparkStretch', 0, 3, 0.01, 'spark stretch');
-    R(sparks, c, 'updraftRate', 0, 900, 1, 'updraft rate');
-    R(sparks, c, 'updraftSize', 0.005, 0.4, 0.005, 'updraft size');
-    R(sparks, c, 'updraftSpeed', 0, 25, 0.1, 'pull-in speed');
-    R(sparks, c, 'updraftLifetime', 0.1, 8, 0.05, 'updraft lifetime');
-    R(sparks, c, 'updraftRise', -5, 25, 0.1, 'lift');
-    R(sparks, c, 'updraftInset', 0, 0.95, 0.01, 'pick-up inset');
-    R(sparks, c, 'updraftTurbulence', 0, 3, 0.01, 'updraft swirl');
-    Editor.gradient(sparks, c, 'colorSpark', 'Spark colour');
-    Editor.gradient(sparks, c, 'colorUpdraft', 'Updraft colour');
-
-    const dust = folder.addFolder('Smoke & debris');
-    R(dust, c, 'smokeRate', 0, 500, 1, 'smoke rate');
-    R(dust, c, 'smokeSize', 0.05, 4, 0.01, 'smoke size');
-    R(dust, c, 'smokeSpeed', 0, 8, 0.05, 'smoke speed');
-    R(dust, c, 'smokeLifetime', 0.2, 8, 0.05, 'smoke lifetime');
-    R(dust, c, 'smokeOpacity', 0, 1, 0.005, 'smoke opacity');
-    R(dust, c, 'smokeRise', -2, 4, 0.01, 'smoke rise');
-    R(dust, c, 'debrisRate', 0, 300, 1, 'debris rate');
-    R(dust, c, 'debrisSize', 0.005, 0.4, 0.005, 'debris size');
-    R(dust, c, 'debrisSpeed', 0, 25, 0.1, 'debris speed');
-    R(dust, c, 'debrisLifetime', 0.1, 5, 0.05, 'debris lifetime');
-    R(dust, c, 'debrisGravity', -50, 0, 0.1, 'debris gravity');
-    Editor.gradient(dust, c, 'colorSmoke', 'Smoke colour');
-    Editor.gradient(dust, c, 'colorDebris', 'Debris colour');
-
-    const impact = folder.addFolder('Throw, snap & hold');
-    R(impact, c, 'muzzleSize', 0.05, 6, 0.05, 'muzzle size');
-    R(impact, c, 'muzzleIntensity', 0, 5, 0.01, 'muzzle intensity');
-    R(impact, c, 'castFlash', 0, 2, 0.01, 'flash on release');
-    R(impact, c, 'burstSize', 0.2, 14, 0.05, 'snap shell size');
-    R(impact, c, 'burstIntensity', 0, 5, 0.01, 'snap shell intensity');
-    R(impact, c, 'burstSparks', 0, 600, 1, 'snap sparks');
-    R(impact, c, 'burstDebris', 0, 300, 1, 'snap debris');
-    R(impact, c, 'pulseRate', 0, 12, 0.1, 'hold shells / sec');
-    R(impact, c, 'pulseSize', 0.1, 10, 0.05, 'hold shell size');
-    R(impact, c, 'pulseIntensity', 0, 5, 0.01, 'hold shell intensity');
-    R(impact, c, 'impactShake', 0, 3, 0.01, 'shake');
-    R(impact, c, 'shakeDuration', 0.1, 4, 0.01, 'shake duration');
-    R(impact, c, 'holdShake', 0, 0.5, 0.005, 'hold rumble');
-    R(impact, c, 'impactFlash', 0, 2, 0.01, 'screen flash');
-    R(impact, c, 'rumble', 0, 0.5, 0.005, 'travel rumble');
-    impact.addColor(c, 'colorCastFlash').name('release flash colour');
-    impact.addColor(c, 'colorBurstA').name('shell');
-    impact.addColor(c, 'colorBurstB').name('shell body');
-    impact.addColor(c, 'colorBurstC').name('shell arcs');
-    impact.addColor(c, 'colorFlash').name('snap flash colour');
-
-    const light = folder.addFolder('Dynamic light');
-    R(light, c, 'lightIntensity', 0, 120, 0.5, 'light intensity');
-    R(light, c, 'lightRadius', 0.5, 50, 0.1, 'light radius');
-    R(light, c, 'lightHeight', 0, 1, 0.01, 'height up the column');
-    R(light, c, 'lightFlicker', 0, 1, 0.01, 'light gutter');
-    R(light, c, 'lightFlickerSpeed', 1, 90, 1, 'gutter rate');
-    light.addColor(c, 'lightColor').name('light colour');
-
-    this.snareFolder = folder;
-  }
-
-  /* ------------------------------------------------------------------ */
-
-  /**
-   * Glacial Crown — the far cast that comes out of the floor.
-   *
-   * `zoneRadius` is again the control that reaches outside the ability: it is
-   * read by the circle indicator *and* by the ring of blades, the sheet and the
-   * curtain, so dragging it re-scales what you aim with and what you get
-   * together. After that the two groups that carry the cast are **The bloom**,
-   * where `sweepTime` decides how the ring closes, and **Freeze front &
-   * shatter**, which is how the ice arrives and how it leaves.
-   */
-  _buildGlacier() {
-    const folder = this.gui.addFolder('❆  Glacial Crown');
-    const c = settings.glacier;
-    const R = Editor.range;
-
-    const cast = folder.addFolder('The cast');
-    R(cast, c, 'zoneRadius', 0.5, 14, 0.05, 'footprint radius');
-    R(cast, c, 'range', 2, 50, 0.1, 'max range');
-    R(cast, c, 'minRange', 0, 10, 0.1, 'min range');
-    R(cast, c, 'speed', 5, 200, 1, 'front speed');
-    R(cast, c, 'snapTime', 0.02, 1.5, 0.01, 'freeze-out time');
-    R(cast, c, 'lifetime', 0.2, 14, 0.05, 'hold time');
-    R(cast, c, 'shatterDelay', 0, 4, 0.01, 'delay before it breaks');
-    R(cast, c, 'shatterStagger', 0, 3, 0.01, 'break stagger');
-    R(cast, c, 'sinkTime', 0.05, 5, 0.01, 'crumble time');
-    R(cast, c, 'cooldown', 0, 8, 0.05, 'cooldown');
-    Editor.castAnimation(cast, c);
-
-    const hand = folder.addFolder('Where the front leaves the hand');
-    R(hand, c, 'handHeight', 0, 3, 0.01, 'hand height');
-    R(hand, c, 'handForward', -1, 3, 0.01, 'hand forward');
-    R(hand, c, 'handSide', -1.5, 1.5, 0.01, 'hand lateral');
-    R(hand, c, 'muzzleSize', 0.05, 6, 0.05, 'muzzle size');
-    R(hand, c, 'muzzleIntensity', 0, 5, 0.01, 'muzzle intensity');
-    R(hand, c, 'castFlash', 0, 2, 0.01, 'flash on release');
-    hand.addColor(c, 'colorCastFlash').name('release flash colour');
-
-    const fill = folder.addFolder('Filling the footprint');
-    R(fill, c, 'spikeCount', 1, 320, 1, 'shards');
-    R(fill, c, 'density', 0.1, 2, 0.01, 'density');
-    R(fill, c, 'ringShare', 0, 1, 0.01, 'share on the wall');
-    R(fill, c, 'coreShare', 0, 0.5, 0.01, 'share on the spire');
-    R(fill, c, 'lateShare', 0, 0.5, 0.01, 'share held back');
-    R(fill, c, 'ringSeat', 0.2, 1.4, 0.01, 'wall seat, × footprint');
-    R(fill, c, 'ringScatter', 0, 0.6, 0.005, 'wall jitter, × footprint');
-    R(fill, c, 'skirtSeat', 0, 1.4, 0.01, 'skirt inner lip, × footprint');
-    R(fill, c, 'skirtBand', 0.02, 1.4, 0.01, 'skirt width, × footprint');
-    R(fill, c, 'skirtBias', 0.2, 3, 0.01, 'skirt crowding');
-    R(fill, c, 'coreSpread', 0.01, 0.6, 0.005, 'spire cluster, × footprint');
-
-    const shape = folder.addFolder('Silhouette');
-    R(shape, c, 'ringHeight', 0.2, 12, 0.05, 'wall height');
-    R(shape, c, 'ringWave', 0, 1, 0.01, 'crest unevenness');
-    R(shape, c, 'skirtHeight', 0.05, 6, 0.05, 'skirt height');
-    R(shape, c, 'coreHeight', 0.2, 12, 0.05, 'spire height');
-    R(shape, c, 'heightJitter', 0, 1.5, 0.01, 'height jitter');
-    R(shape, c, 'ringLean', -1.5, 1.5, 0.01, 'wall lean (0 = a fence)');
-    R(shape, c, 'skirtLean', -1.5, 1.5, 0.01, 'skirt lean');
-    R(shape, c, 'coreLean', -1.5, 1.5, 0.01, 'spire lean');
-    R(shape, c, 'leanJitter', 0, 3, 0.01, 'lean jitter');
-    R(shape, c, 'fan', 0, 1.6, 0.01, 'splay off the radius');
-    R(shape, c, 'twist', 0, 1, 0.01, 'random yaw');
-    R(shape, c, 'rubble', 0, 1, 0.01, 'rubble fraction');
-    R(shape, c, 'rubbleScale', 0.05, 1, 0.01, 'rubble height');
-
-    const crystal = folder.addFolder('The crystal');
-    R(crystal, c, 'radius', 0.05, 1.2, 0.005, 'base radius');
-    R(crystal, c, 'radiusJitter', 0, 1.5, 0.01, 'radius jitter');
-    R(crystal, c, 'taper', 0.01, 0.9, 0.01, 'tip taper');
-    R(crystal, c, 'facets', 3, 12, 1, 'facets');
-    R(crystal, c, 'roughness', 0, 1, 0.01, 'facet roughness');
-    R(crystal, c, 'bend', 0, 1.5, 0.01, 'bend');
-
-    const bloom = folder.addFolder('The bloom');
-    R(bloom, c, 'sweepTime', 0, 3, 0.01, 'sweep around the ring');
-    R(bloom, c, 'skirtDelay', 0, 2, 0.01, 'skirt delay');
-    R(bloom, c, 'skirtWave', 0, 2, 0.01, 'skirt wave');
-    R(bloom, c, 'coreDelay', 0, 2, 0.01, 'spire delay');
-    R(bloom, c, 'stagger', 0, 1, 0.005, 'random stagger');
-    R(bloom, c, 'bloomSpread', 0, 1, 0.01, 'late shards spread');
-    R(bloom, c, 'riseTime', 0.02, 1.5, 0.01, 'rise time');
-    R(bloom, c, 'riseOvershoot', 0, 1.5, 0.01, 'punch overshoot');
-    R(bloom, c, 'settle', 0.05, 2, 0.01, 'settle');
-
-    const material = folder.addFolder('Prismatic glass');
-    R(material, c, 'opacity', 0, 1, 0.01, 'opacity');
-    R(material, c, 'body', 0, 2, 0.01, 'body (0 = pure edges)');
-    R(material, c, 'edgePower', 0.5, 8, 0.01, 'edge tightness');
-    R(material, c, 'edgeGain', 0, 6, 0.01, 'edge gain');
-    R(material, c, 'dispersion', 0, 1, 0.01, 'chromatic split');
-    R(material, c, 'pipe', 0, 5, 0.01, 'piped light');
-    R(material, c, 'tipBias', 0.2, 6, 0.01, 'crowding to the point');
-    R(material, c, 'bands', 0, 8, 0.05, 'travelling bands');
-    R(material, c, 'pulseSpeed', -4, 4, 0.01, 'band speed');
-    R(material, c, 'tipStart', 0, 1, 0.01, 'tip start');
-    R(material, c, 'tipGlow', 0, 6, 0.01, 'tip glow');
-    R(material, c, 'stria', 0, 3, 0.01, 'flow lines');
-    R(material, c, 'striaScale', 0.5, 24, 0.1, 'flow line scale');
-    R(material, c, 'envIntensity', 0, 3, 0.01, 'env reflection');
-    R(material, c, 'specular', 0, 8, 0.05, 'sun glint');
-    R(material, c, 'glow', 0, 4, 0.01, 'glow');
-    R(material, c, 'birthGlow', 0, 6, 0.01, 'birth flash');
-    R(material, c, 'birthFade', 0.02, 3, 0.01, 'birth fade');
-    material.addColor(c, 'colorGlass').name('body');
-    material.addColor(c, 'colorEdge').name('edge & glint');
-    material.addColor(c, 'colorPrismA').name('dispersion A');
-    material.addColor(c, 'colorPrismB').name('dispersion B');
-    material.addColor(c, 'colorCore').name('piped light');
-    material.addColor(c, 'colorTip').name('tip');
-
-    const growth = folder.addFolder('Freeze front & shatter');
-    R(growth, c, 'frontRough', 0, 1.5, 0.01, 'front raggedness');
-    R(growth, c, 'frontWidth', 0.01, 0.8, 0.01, 'front width');
-    R(growth, c, 'frontGlow', 0, 8, 0.05, 'front glow');
-    R(growth, c, 'shatterScale', 1, 24, 0.1, 'break-up cells');
-    R(growth, c, 'shatterEdge', 0.005, 0.4, 0.005, 'break edge width');
-    R(growth, c, 'shatterGlow', 0, 8, 0.05, 'break glow');
-
-    const field = folder.addFolder('The sheet on the floor');
-    R(field, c, 'fieldBoundary', 0.02, 2, 0.01, 'band thickness');
-    R(field, c, 'fieldBoundaryGlow', 0, 8, 0.05, 'band glow');
-    R(field, c, 'fieldFill', 0, 2, 0.01, 'interior fill');
-    R(field, c, 'fieldFalloff', 0.1, 5, 0.05, 'fill falloff');
-    R(field, c, 'fieldPlates', 0, 3, 0.01, 'plate break-up');
-    R(field, c, 'fieldPlateScale', 0.2, 10, 0.05, 'plates / metre');
-    R(field, c, 'fieldSeam', 0, 3, 0.01, 'seam rime');
-    R(field, c, 'fieldFingers', 0, 3, 0.01, 'frost fingers');
-    R(field, c, 'fieldFingerScale', 0.1, 8, 0.05, 'fingers / metre');
-    R(field, c, 'fieldWarp', 0, 2, 0.01, 'domain warp');
-    R(field, c, 'fieldCrawl', -4, 4, 0.01, 'finger crawl');
-    R(field, c, 'fieldRings', 0, 12, 0.1, 'pressure rings');
-    R(field, c, 'fieldRingSpeed', -6, 6, 0.01, 'ring speed');
-    R(field, c, 'fieldSweep', 0, 3, 0.01, 'cold sweep');
-    R(field, c, 'fieldSweepSpeed', -2, 2, 0.01, 'sweep speed');
-    R(field, c, 'fieldCore', 0, 4, 0.01, 'centre pool');
-    R(field, c, 'fieldCoreSize', 0.02, 1, 0.005, 'pool size, × footprint');
-    R(field, c, 'fieldPulse', 0, 1, 0.01, 'pulse');
-    R(field, c, 'fieldPulseSpeed', 0, 10, 0.05, 'pulse speed');
-    R(field, c, 'fieldOpacity', 0, 2, 0.01, 'opacity');
-    R(field, c, 'fieldHeight', 0.005, 0.4, 0.005, 'hover height');
-    field.addColor(c, 'colorField').name('sheet');
-    field.addColor(c, 'colorFieldEdge').name('band & seams');
-
-    const veil = folder.addFolder('The curtain of cold');
-    R(veil, c, 'veil', 0, 2, 0.01, 'opacity (0 hides it)');
-    R(veil, c, 'veilHeight', 0.1, 8, 0.05, 'height');
-    R(veil, c, 'veilRadius', 0.5, 1.6, 0.005, 'seat, × footprint');
-    R(veil, c, 'veilFlare', -0.5, 1.5, 0.01, 'outward lean');
-    R(veil, c, 'veilBillow', 0, 1.5, 0.01, 'silhouette lobes');
-    R(veil, c, 'veilScale', 0.1, 6, 0.05, 'noise / metre');
-    R(veil, c, 'veilStretch', 0.05, 3, 0.01, 'vertical stretch');
-    R(veil, c, 'veilFlow', -4, 4, 0.01, 'fall speed');
-    R(veil, c, 'veilErode', 0, 1, 0.01, 'erosion with height');
-    R(veil, c, 'veilFalloff', 0.2, 6, 0.05, 'thinning with height');
-    R(veil, c, 'veilSpin', -1, 1, 0.005, 'rotation');
-    R(veil, c, 'veilSoftFade', 0.02, 3, 0.01, 'soft intersection');
-    veil.addColor(c, 'colorVeil').name('curtain');
-    veil.addColor(c, 'colorVeilCrest').name('crest');
-
-    const ground = folder.addFolder('Rime');
-    R(ground, c, 'trailFrostRate', 0.05, 10, 0.05, 'trail rime / metre');
-    R(ground, c, 'trailFrostRadius', 0.05, 6, 0.05, 'trail rime radius');
-    R(ground, c, 'frostSpread', 0.2, 4, 0.05, 'impact rime, × footprint');
-    R(ground, c, 'frostLife', 0.5, 20, 0.1, 'rime lifetime');
-    R(ground, c, 'frostIntensity', 0, 2, 0.01, 'rime intensity');
-    R(ground, c, 'frostCrystals', 0, 4, 0.01, 'snow grain');
-    R(ground, c, 'frostCollar', 0, 8, 0.05, 'collar, × shard radius');
-    R(ground, c, 'rimeRate', 0, 20, 0.1, 'rim rime / sec');
-    R(ground, c, 'rimeRadius', 0.05, 6, 0.05, 'rim rime radius');
-    R(ground, c, 'shockRadius', 0.5, 25, 0.1, 'shockwave radius');
-    R(ground, c, 'ringRate', 0, 12, 0.1, 'pressure rings / sec');
-    ground.addColor(c, 'colorFrost').name('snow');
-    ground.addColor(c, 'colorFrostEdge').name('snow shadow');
-    ground.addColor(c, 'colorShockA').name('shockwave ring');
-    ground.addColor(c, 'colorShockB').name('shockwave crest');
-
-    const air = folder.addFolder('Mist, glitter & snow');
-    R(air, c, 'mistRate', 0, 900, 1, 'mist rate');
-    R(air, c, 'mistSize', 0.05, 4, 0.01, 'mist size');
-    R(air, c, 'mistSpeed', 0, 8, 0.05, 'mist speed');
-    R(air, c, 'mistLifetime', 0.2, 8, 0.05, 'mist lifetime');
-    R(air, c, 'mistOpacity', 0, 1, 0.005, 'mist opacity');
-    R(air, c, 'mistRise', -3, 3, 0.01, 'mist rise (− falls)');
-    R(air, c, 'mistTurbulence', 0, 3, 0.01, 'mist swirl');
-    R(air, c, 'glitterRate', 0, 900, 1, 'glitter rate');
-    R(air, c, 'glitterSize', 0.005, 0.4, 0.005, 'glitter size');
-    R(air, c, 'glitterSpeed', 0, 20, 0.1, 'glitter speed');
-    R(air, c, 'glitterLifetime', 0.1, 8, 0.05, 'glitter lifetime');
-    R(air, c, 'glitterRise', -3, 8, 0.01, 'glitter lift');
-    R(air, c, 'glitterTurbulence', 0, 3, 0.01, 'glitter swirl');
-    R(air, c, 'glitterGlow', 0, 4, 0.01, 'glitter glow');
-    R(air, c, 'snowRate', 0, 600, 1, 'snow rate');
-    R(air, c, 'snowSize', 0.005, 0.4, 0.005, 'snow size');
-    R(air, c, 'snowSpeed', 0, 10, 0.05, 'initial push');
-    R(air, c, 'snowLifetime', 0.2, 10, 0.05, 'snow lifetime');
-    R(air, c, 'snowFall', -12, 2, 0.05, 'snow gravity');
-    R(air, c, 'snowTurbulence', 0, 3, 0.01, 'snow drift');
-    R(air, c, 'snowGlow', 0, 4, 0.01, 'snow glow');
-    R(air, c, 'snowInset', 0.05, 1.4, 0.01, 'fall inset, × footprint');
-    R(air, c, 'snowHeight', 0.2, 4, 0.05, 'fall height, × wall');
-    Editor.gradient(air, c, 'colorMist', 'Mist colour');
-    Editor.gradient(air, c, 'colorGlitter', 'Glitter colour');
-    Editor.gradient(air, c, 'colorSnow', 'Snow colour');
-
-    const chips = folder.addFolder('Ice chips');
-    R(chips, c, 'shardSize', 0.005, 0.5, 0.005, 'chip size');
-    R(chips, c, 'shardSpeed', 0, 30, 0.1, 'chip speed');
-    R(chips, c, 'shardLifetime', 0.1, 6, 0.05, 'chip lifetime');
-    R(chips, c, 'shardGravity', -50, 0, 0.1, 'chip gravity');
-    R(chips, c, 'breachShards', 0, 30, 1, 'chips on breach');
-    R(chips, c, 'shatterShards', 0, 30, 1, 'chips on break-up');
-    Editor.gradient(chips, c, 'colorShard', 'Chip colour');
-
-    const impact = folder.addFolder('Bloom & hold');
-    R(impact, c, 'burstSize', 0.2, 14, 0.05, 'vapour shell size');
-    R(impact, c, 'burstIntensity', 0, 5, 0.01, 'vapour shell intensity');
-    R(impact, c, 'burstShards', 0, 600, 1, 'bloom chips');
-    R(impact, c, 'burstMist', 0, 400, 1, 'bloom mist');
-    R(impact, c, 'burstGlitter', 0, 600, 1, 'bloom glitter');
-    R(impact, c, 'vapourRate', 0, 12, 0.05, 'hold shells / sec');
-    R(impact, c, 'vapourSize', 0.1, 10, 0.05, 'hold shell size');
-    R(impact, c, 'vapourIntensity', 0, 5, 0.01, 'hold shell intensity');
-    R(impact, c, 'impactShake', 0, 3, 0.01, 'shake');
-    R(impact, c, 'shakeDuration', 0.1, 4, 0.01, 'shake duration');
-    R(impact, c, 'holdShake', 0, 0.5, 0.005, 'hold rumble');
-    R(impact, c, 'impactFlash', 0, 2, 0.01, 'screen flash');
-    R(impact, c, 'rumble', 0, 0.5, 0.005, 'travel rumble');
-    impact.addColor(c, 'colorBurstA').name('shell');
-    impact.addColor(c, 'colorBurstB').name('shell body');
-    impact.addColor(c, 'colorBurstC').name('shell plates');
-    impact.addColor(c, 'colorFlash').name('bloom flash colour');
-
-    const light = folder.addFolder('Dynamic light');
-    R(light, c, 'lightIntensity', 0, 120, 0.5, 'light intensity');
-    R(light, c, 'lightRadius', 0.5, 50, 0.1, 'light radius');
-    R(light, c, 'lightHeight', 0, 1, 0.01, 'height up the crown');
-    light.addColor(c, 'lightColor').name('light colour');
-
-    this.glacierFolder = folder;
-  }
-
-  /* ------------------------------------------------------------------ */
-
   _buildEnvironment() {
     const folder = this.gui.addFolder('Environment');
     const e = settings.environment;
@@ -1628,7 +1279,14 @@ export class Editor {
     R(folder, p, 'vignette', 0, 1.5, 0.01, 'vignette');
     R(folder, p, 'chromaticAberration', 0, 3, 0.01, 'chromatic aberration');
     R(folder, p, 'grain', 0, 0.2, 0.001, 'film grain');
-    R(folder, p, 'distortion', 0, 0.2, 0.001, 'screen warp');
+    // 0..2, not 0..0.2. The old range predates anything writing to the
+    // refraction buffer and could not reach the shipping default of 1.0 — a
+    // control pinned below its own value can only ever come down.
+    R(folder, p, 'distortion', 0, 2, 0.005, 'screen warp');
+    // Quality path for the refraction pass. Off costs nothing per frame; the
+    // scale reallocates the offset buffer on the frame it changes and no other.
+    folder.add(p, 'distortionEnabled').name('refraction pass');
+    R(folder, p, 'distortionScale', 0.25, 1, 0.05, 'warp buffer scale');
     R(folder, p, 'flashStrength', 0, 2, 0.01, 'impact flash');
   }
 
@@ -1679,6 +1337,7 @@ export class Editor {
   }
 
   dispose() {
+    clearTimeout(this._settleTimer);
     this.gui.destroy();
   }
 }
