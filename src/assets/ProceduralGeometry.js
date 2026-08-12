@@ -259,7 +259,19 @@ export function createAsteroidGeometry({
   craterDepth = 0.18,
   craterSize = 0.5
 } = {}) {
-  const geometry = new IcosahedronGeometry(1, clamp(Math.round(detail), 0, 3)).toNonIndexed();
+  // Every vertex is displaced on its own below, so shared vertices would weld
+  // the cuts and craters back together — the rock has to be non-indexed. It
+  // already is: `PolyhedronGeometry` expands its faces as it builds them, and
+  // calling `toNonIndexed()` on that only earns a console warning, forty-five
+  // of them in one harness run because Cinder Fall rebuilds its rock live when
+  // a shape slider moves. Convert only if three ever starts indexing it, and
+  // drop the original on the floor when we do.
+  const base = new IcosahedronGeometry(1, clamp(Math.round(detail), 0, 3));
+  let geometry = base;
+  if (base.index) {
+    geometry = base.toNonIndexed();
+    base.dispose();
+  }
   const array = geometry.attributes.position.array;
 
   /** A deterministic point on the unit sphere. */

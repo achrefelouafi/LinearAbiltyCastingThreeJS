@@ -13,11 +13,14 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { GradeShader } from './GradeShader.js';
 import { DistortionShader } from './DistortionShader.js';
-import { LAYER } from '../core/Layers.js';
+import { LAYER, distortionWriters } from '../core/Layers.js';
 import { frame } from '../core/FrameUniforms.js';
 import { settings } from '../config/settings.js';
 
 const DISTORTION_CLEAR = new Color(0.5, 0.5, 0.0);
+
+/** `post.distortionScale` is clamped here: below this the warp visibly stairsteps. */
+const MIN_DISTORTION_SCALE = 0.25;
 
 /**
  * The full render pipeline.
@@ -25,11 +28,34 @@ const DISTORTION_CLEAR = new Color(0.5, 0.5, 0.0);
  * Per frame:
  *   1. depth prepass  — opaque WORLD layer into a packed-depth buffer, which
  *                       every VFX shader samples for soft intersections
- *   2. distortion     — DISTORTION layer into an offset buffer
+ *   2. distortion     — DISTORTION layer into an offset buffer, *if anything is
+ *                       writing to it*
  *   3. composer       — scene → refraction → bloom → tone map → grade
  *
- * Passes 1 and 2 run at half resolution: both are only ever read as smooth,
- * low-frequency data, so full resolution would be wasted fill rate.
+ * Pass 1 runs at half resolution and pass 2 at `post.distortionScale` of it:
+ * both are only ever read as smooth, low-frequency data, so full resolution
+ * would be wasted fill rate.
+ *
+ * ## The distortion pass
+ *
+ * This used to be dead weight — the README carried "the distortion pass runs
+ * with nothing writing to it, it costs a half-res clear per frame" as a known
+ * rough edge. `vfx/Distortion.js` now writes to it, and the accounting works
+ * both ways: `core/Layers.js#distortionWriters` counts the meshes currently
+ * *visible* on the layer, and when that count is zero the clear, the draw and
+ * the full-res resample are all skipped. An idle frame is therefore cheaper than
+ * it was before the pass did anything.
+ *
+ * Three switches gate it, in order of how blunt they are:
+ *
+ *  - `post.enabled` — the whole stack, as before.
+ *  - `post.distortionEnabled` — the refraction pass alone. This is the one to
+ *    turn off on weak hardware; it removes a render target's worth of bandwidth
+ *    and a dependent texture fetch per pixel.
+ *  - `post.distortionScale` — the offset buffer's resolution as a fraction of
+ *    the frame. 0.5 is the shipped value and what the buffer always was; 0.25 is
+ *    the potato setting and is still perfectly smooth for heat and lensing,
+ *    because nothing that writes here has an edge sharper than a metre.
  */
 export class PostProcessing {
   constructor(renderer, scene, camera) {
@@ -43,13 +69,24 @@ export class PostProcessing {
     const width = Math.floor(size.x * pixelRatio);
     const height = Math.floor(size.y * pixelRatio);
 
+    /** Device pixels of the frame, kept so the offset buffer can be re-scaled live. */
+    this._pixelWidth = width;
+    this._pixelHeight = height;
+    this._distortionScale = 0.5;
+    /** Set every `sync()`: whether pass 2 has anything to do this frame. */
+    this._distortionActive = false;
+
     /* ---- auxiliary buffers ---- */
     this.depthTarget = new WebGLRenderTarget(Math.floor(width / 2), Math.floor(height / 2));
     this.depthTarget.texture.generateMipmaps = false;
     this.depthMaterial = new MeshDepthMaterial({ depthPacking: RGBADepthPacking });
 
+    // No depth attachment: the emitters are depth-test-off by construction and
+    // do their own occlusion against the prepass, so a depth buffer here would
+    // be a per-frame clear of memory nothing ever reads.
     this.distortionTarget = new WebGLRenderTarget(Math.floor(width / 2), Math.floor(height / 2), {
-      type: HalfFloatType
+      type: HalfFloatType,
+      depthBuffer: false
     });
     this.distortionTarget.texture.generateMipmaps = false;
 
@@ -117,6 +154,24 @@ export class PostProcessing {
     gl.setClearColor(this._clearColor, previousAlpha);
   }
 
+  /**
+   * Re-size the offset buffer when `post.distortionScale` moves.
+   *
+   * A live slider that reallocates a render target is normally a bad idea, but
+   * this one is dragged once on a machine that is struggling and then never
+   * again, and gating it behind a dimension compare means the reallocation only
+   * happens on the frame the value actually changes.
+   */
+  _syncDistortionScale(scale) {
+    const clamped = Math.min(1, Math.max(MIN_DISTORTION_SCALE, scale || 0.5));
+    if (clamped === this._distortionScale) return;
+    this._distortionScale = clamped;
+    this.distortionTarget.setSize(
+      Math.max(2, Math.floor(this._pixelWidth * clamped)),
+      Math.max(2, Math.floor(this._pixelHeight * clamped))
+    );
+  }
+
   /** Screen-space refraction offsets. */
   _renderDistortion() {
     const gl = this.gl;
@@ -164,13 +219,27 @@ export class PostProcessing {
     u.uFlashStrength.value = flash.strength;
     u.uFlashColor.value.copy(flash.color);
 
-    this.distortionPass.uniforms.uScale.value = post.enabled ? post.distortion : 0;
-    this.distortionPass.enabled = post.enabled;
+    /* ---- the refraction pass ---- */
+    // `global.distortion` is applied here and only here. Emitters write a bare
+    // direction and magnitude; folding the two master gains in at the writing
+    // end would let one ability apply them twice and another not at all.
+    const warp =
+      post.enabled && post.distortionEnabled !== false
+        ? post.distortion * settings.global.distortion
+        : 0;
+
+    this._syncDistortionScale(post.distortionScale);
+    this.distortionPass.uniforms.uScale.value = warp;
+
+    // Nothing visible on the layer means the clear, the draw and the resample
+    // are all skipped — see `core/Layers.js#distortionWriters`.
+    this._distortionActive = warp > 0.00005 && distortionWriters.count > 0;
+    this.distortionPass.enabled = this._distortionActive;
   }
 
   render() {
     this._renderDepth();
-    this._renderDistortion();
+    if (this._distortionActive) this._renderDistortion();
     // Tone mapping is applied by OutputPass: three automatically disables the
     // in-material tone mapping while rendering into the composer's targets.
     this.composer.render();
@@ -184,8 +253,13 @@ export class PostProcessing {
 
     const w = Math.floor(width * pixelRatio);
     const h = Math.floor(height * pixelRatio);
+    this._pixelWidth = w;
+    this._pixelHeight = h;
     this.depthTarget.setSize(Math.max(2, Math.floor(w / 2)), Math.max(2, Math.floor(h / 2)));
-    this.distortionTarget.setSize(Math.max(2, Math.floor(w / 2)), Math.max(2, Math.floor(h / 2)));
+    this.distortionTarget.setSize(
+      Math.max(2, Math.floor(w * this._distortionScale)),
+      Math.max(2, Math.floor(h * this._distortionScale))
+    );
     frame.uResolution.value.set(w, h);
   }
 

@@ -14,6 +14,7 @@ import {
 } from 'three';
 import { noiseGLSL } from '../shaders/lib/noise.glsl.js';
 import { commonGLSL } from '../shaders/lib/common.glsl.js';
+import { timeWarpGLSL } from '../shaders/lib/timewarp.glsl.js';
 import { sharedUniforms } from '../core/FrameUniforms.js';
 import { LAYER } from '../core/Layers.js';
 
@@ -396,26 +397,33 @@ const PARTICLE_VERTEX = /* glsl */ `
   varying vec3  vTint;
   varying float vViewZ;
   varying vec3  vNormalish;
+  /**
+   * The clock this particle is actually living on — uTime for all but the
+   * handful held inside a time region. The fragment stage needs it because the
+   * SMOKE silhouette erodes on a clock of its own, and a puff frozen in mid-air
+   * that is still churning internally is very obviously not frozen.
+   */
+  varying float vClock;
 
   ${noiseGLSL}
+  ${timeWarpGLSL}
 
-  void main() {
-    vUv = uv;
-    vSeed = aSeed;
-    vTint = aColor;
-
-    float life = aLife * uLifeScale;
-    float age = uTime - aSpawn;
-    float t = age / max(life, 1e-4);
-    vT = t;
-
-    // Dead particles are pushed outside the clip volume; the GPU discards the
-    // whole triangle before rasterisation.
-    if (age < 0.0 || t > 1.0) {
-      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-      return;
-    }
-
+  /**
+   * The whole trajectory, as a closed-form function of age.
+   *
+   * This used to be inline in main. It is a function now for one reason: a
+   * particle sitting inside a stasis region has to be asked *where it was when
+   * the region locked*, which means evaluating the same path at a second age in
+   * the same invocation. Nothing about the arithmetic changed when it moved —
+   * with no region live the function is called exactly once and the compiler
+   * inlines it, so the shader that ships is the shader that shipped before.
+   *
+   * clock is passed rather than read from uTime so the curl advection also
+   * freezes: the noise field this samples drifts on the clock, and a frozen
+   * ember riding a field that is still flowing crawls sideways for as long as
+   * you hold it.
+   */
+  vec3 particlePath(float age, float t, float clock) {
     vec3 vel = aVelocity * uSpeedScale;
 
     // Analytic exponential drag — exact, and independent of frame rate.
@@ -438,7 +446,7 @@ const PARTICLE_VERTEX = /* glsl */ `
     // Turbulence: a cheap deterministic wobble, optionally upgraded to real
     // curl noise for the heavier smoke/flame systems.
     #ifdef USE_CURL
-      pos += curlNoise(aStart * uTurbFrequency + vec3(0.0, uTime * uTurbSpeed, 0.0) + aSeed * 4.0)
+      pos += curlNoise(aStart * uTurbFrequency + vec3(0.0, clock * uTurbSpeed, 0.0) + aSeed * 4.0)
              * uTurbulence * age;
     #else
       vec3 wobble = vec3(
@@ -448,6 +456,69 @@ const PARTICLE_VERTEX = /* glsl */ `
       );
       pos += wobble * uTurbulence * age * 0.55;
     #endif
+
+    return pos;
+  }
+
+  void main() {
+    vUv = uv;
+    vSeed = aSeed;
+    vTint = aColor;
+
+    float life = aLife * uLifeScale;
+    float rawAge = uTime - aSpawn;
+
+    /* ---- which clock is this particle on? ------------------------------
+     *
+     * Nothing below this comment costs anything while uTimeRegionCount is 0,
+     * which is every frame in which no chrono ability is standing: one uniform
+     * compare, taken the same way by every vertex in the draw.
+     *
+     * When a region *is* live, each slot is probed at the position this
+     * particle had **on the frame that slot locked** — not at its current
+     * position. The obvious version probes the current position and it thaws
+     * its own freeze one frame later: the particle stops, the world clock runs
+     * on, and the probe is now asking about a place the particle only occupies
+     * because it is held. Probing the lock instant is a fixed point instead,
+     * and it is also the right fiction — a bubble of stopped time holds
+     * whatever was inside it when it snapped shut.
+     *
+     * The probe age is clamped into [0, min(rawAge, life)], which handles
+     * three cases without a branch: a particle born after the lock probes its
+     * own spawn point (so an emitter firing into a standing field has its
+     * output frozen on arrival), a particle that died before the lock probes
+     * its last position and is then killed by the t > 1.0 test below, and a
+     * dead slot in the ring buffer — spawn time -1e4, life 0 — probes age 0
+     * rather than evaluating curl noise ten thousand seconds out.
+     */
+    float clock = uTime;
+    if (uTimeRegionCount > 0.5 && rawAge > 0.0) {
+      for (int i = 0; i < MAX_TIME_REGIONS; i++) {
+        if (float(i) >= uTimeRegionCount) break;
+        vec4 region = uTimeRegion[i];
+        vec4 warp = uTimeRegionWarp[i];
+        float probeAge = clamp(warp.z - aSpawn, 0.0, min(rawAge, life));
+        vec3 probe = particlePath(probeAge, probeAge / max(life, 1e-4), warp.z);
+        clock = timeRegionClock(clock, warp, timeRegionFalloff(probe, region, warp));
+      }
+    }
+    vClock = clock;
+
+    float age = clock - aSpawn;
+    float t = age / max(life, 1e-4);
+    vT = t;
+
+    // Dead particles are pushed outside the clip volume; the GPU discards the
+    // whole triangle before rasterisation. This runs on the *bent* age, which
+    // is what makes a region with a negative rate un-spawn its particles: they
+    // fly backwards into the emitter, reach age 0, and stop existing there.
+    if (age < 0.0 || t > 1.0) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      return;
+    }
+
+    vec3 vel = aVelocity * uSpeedScale;
+    vec3 pos = particlePath(age, t, clock);
 
     vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
     vViewZ = mvPosition.z;
@@ -501,6 +572,7 @@ const PARTICLE_FRAGMENT = /* glsl */ `
   varying vec3  vTint;
   varying float vViewZ;
   varying vec3  vNormalish;
+  varying float vClock;   // the vertex stage's bent clock — see the vertex shader
 
   ${noiseGLSL}
   ${commonGLSL}
@@ -513,7 +585,9 @@ const PARTICLE_FRAGMENT = /* glsl */ `
       return smoothstep(1.0, 0.0, d);
 
     #elif SHAPE == 1                     // SMOKE
-      float n = fbm3(vec3(c * 1.6, vSeed * 21.0 + uTime * 0.25));
+      // vClock, not uTime: the erosion is the one part of a puff that is
+      // animated rather than parametric, so a held puff has to hold this too.
+      float n = fbm3(vec3(c * 1.6, vSeed * 21.0 + vClock * 0.25));
       return smoothstep(1.0, 0.05, d + n * 0.42) * 0.9;
 
     #elif SHAPE == 2                     // STREAK

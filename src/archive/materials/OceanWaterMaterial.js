@@ -265,10 +265,9 @@ export class OceanWaterMaterial extends ShaderMaterial {
           return v / norm;
         }
 
-        vec2 equirectUv(vec3 dir) {
-          return vec2(atan(dir.z, dir.x) * 0.15915494 + 0.5,
-                      asin(clamp(dir.y, -1.0, 1.0)) * 0.31830989 + 0.5);
-        }
+        // equirectUv used to be defined here. It now lives in commonGLSL, which
+        // this shader already injects above, and declaring it twice is a compile
+        // error — so if you revive this material, it works as-is.
 
         /**
          * Floor under the reflected environment.

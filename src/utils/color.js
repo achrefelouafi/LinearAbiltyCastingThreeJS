@@ -31,3 +31,29 @@ export function copyColor(target, hex) {
 export function makeColor(hex) {
   return getColor(hex).clone();
 }
+
+/**
+ * `copyColor` for a params bag: takes a `#rrggbb` string **or** a `THREE.Color`
+ * **or** nothing, and falls back.
+ *
+ * Every VFX module reads its colours off a live params object every frame, and
+ * every one of them has to answer the same three questions: did the caller
+ * supply this key at all, did they supply a string from a settings block or a
+ * Color they are already holding, and what does the module look like if they
+ * did not. `copyColor` above answers none of them — it is the fast path for a
+ * key you know is a string.
+ *
+ * `Dissolve` and `FoldMesh` each arrived with a private, character-identical
+ * copy of this function; it is here so the next module does not write a third.
+ * Note `??`, not `||`: an empty string is a caller mistake worth seeing as
+ * black rather than silently becoming the fallback.
+ *
+ * @param {THREE.Color} target the uniform's Color, mutated in place
+ * @param {string|THREE.Color|null|undefined} value from the params bag
+ * @param {string|THREE.Color} fallback the module's default
+ */
+export function putColor(target, value, fallback) {
+  const v = value ?? fallback;
+  target.copy(typeof v === 'string' ? getColor(v) : v);
+  return target;
+}
