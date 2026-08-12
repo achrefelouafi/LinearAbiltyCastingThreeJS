@@ -2,11 +2,16 @@
 
 A skillshot VFX sandbox built with **Three.js**, **Vite** and hand-written **GLSL**.
 
-Five abilities and two ways to aim them. Four are **line casts**: press the key to arm, a
-League-of-Legends style arrow appears on the ground and swings with the mouse, click to fire. The
-fifth is a **far cast**: the arrow is replaced by a circle with a deliberately thick boundary that
-follows the cursor and answers the only question a ground-targeted AoE has to answer before you
-commit — how much space is this going to take.
+**One hundred abilities** across fifteen schools, and two ways to aim them. Fifty are **line
+casts**: press the key to arm, a League-of-Legends style arrow appears on the ground and swings
+with the mouse, click to fire. The other fifty are **far casts**: the arrow is replaced by a circle
+with a deliberately thick boundary that follows the cursor and answers the only question a
+ground-targeted AoE has to answer before you commit — how much space is this going to take.
+
+Eight of the hundred are on the bar at a time. **Tab** opens the spellbook; drag a card onto a slot
+to bind it. The six below are the ones the sandbox shipped with and the ones the rest were built
+to the standard of — see `docs/ROSTER.md` and `docs/ROSTER-II.md` for the other ninety-four, each
+with the one technique that makes it read.
 
 **Q — Frost Lance.** A fracture front races out along the line while a field of ice crystals
 tears up out of the floor behind it — small and dense at your feet, opening into a wall of blades
@@ -42,8 +47,8 @@ whole cage is that same ribbon strip threaded along four different parametric pa
 targeting circle, the rime, the burns and the molten cracks are signed-distance and noise shaders,
 and the mist, sparks, chips and glitter are GPU particles.
 
-**Every parameter is a live slider** — 938 of them — and they stay live while the simulation is
-paused. That is the point of the project: freeze a frame mid-eruption, mid-strike or mid-burn with
+**Every parameter is a live slider** — a little over 16,000 of them — and they stay live while the
+simulation is paused. That is the point of the project: freeze a frame mid-eruption, mid-strike or mid-burn with
 **P**, then reshape the silhouette, the palette and the timing against a still image.
 
 References for the look: `icecast.jpg`, `thundercast.jpg`, `superbeam.jpg` and
@@ -106,6 +111,11 @@ shown as a visible sky. The stage keeps its flat dark backdrop.
 
 ## Controls
 
+The bar is a **loadout**: eight slots over the whole roster, bound to `Q E R F V X Z T` with the
+digits `1..8` mirroring them. The default is the six that shipped in slots 1–6 and two empty
+slots; the binding is saved to `localStorage` and rebound from the spellbook. An empty slot's key
+opens the spellbook ready to fill it.
+
 | Input | Action |
 | --- | --- |
 | **Q** (or **1**) | Arm Frost Lance — press again to put it away |
@@ -113,6 +123,9 @@ shown as a visible sky. The stage keeps its flat dark backdrop.
 | **R** (or **3**) | Arm Cinder Fall — press again to put it away |
 | **F** (or **4**) | Arm Nova Beam — press again to put it away |
 | **V** (or **5**) | Arm Voltaic Snare — the far cast, aimed with a circle |
+| **X** (or **6**) | Arm Glacial Crown — the other far cast |
+| **Z**, **T** (or **7**, **8**) | The two open slots — empty until you bind something |
+| **Tab** or **B** | Open the spellbook: the whole roster, by school |
 | **Move the mouse** | Swing the aim arrow, or move the far-cast circle |
 | **Left click** | Cast along the arrow, or drop the circle where it is |
 | **Esc** / **right click** | Cancel an armed cast |
@@ -122,6 +135,11 @@ shown as a visible sky. The stage keeps its flat dark backdrop.
 | **P** | Pause / resume — *the editor keeps applying* |
 | **C** | Clear all active effects |
 | **H** | Hide the controls panel |
+| **Click a slot's name** | Open that ability's folder in the editor |
+
+In the spellbook: type to filter by name, school or description; arrow keys and **Enter** to
+browse and cast; **shift-click** a card, or drag it onto a slot, to bind it; **Esc** to close.
+The loadout bar stays live underneath the book so it can be dropped on.
 
 `range` and `minRange` are per ability, so the indicator's reach changes with the slot you have
 selected. Aiming closer than the selected ability's `minRange` tints it red and refuses the cast;
@@ -135,24 +153,28 @@ spending one slot never locks the other out.
 
 ```
 src/
-  abilities/      Ability base class (the travelling front), IceAbility, ThunderAbility,
-                  MeteorAbility, BeamAbility, SnareAbility, pooling manager
+  abilities/      Ability base class (the travelling front), registry.js (the one
+                  declaration site), one directory per school, pooling manager
   animation/      FBX character loading, AnimationMixer, the per-ability cast clips,
                   the procedural cast lunge
   assets/         Procedural crystal and asteroid geometry, the bolt ribbon strip,
                   the beam tube and its shock discs
-  config/         settings.js — the single source of truth for every parameter
+  config/         settings.js (globals, aim, post, camera) and abilities/<id>.js —
+                  one settings block and editor schema per ability
   core/           App, Renderer, CameraRig, Time, Layers, shared frame uniforms
   effects/        Aim arrow, far-cast circle, ground decals, fissures, bursts,
                   light pool, shake, flash
   input/          InputManager (events) and AimController (both targeting shapes)
   loaders/        AssetLoader with a shared LoadingManager
-  materials/      IceMaterial, LightningMaterial, MeteorMaterial,
-                  VolumetricFireMaterial, BeamMaterial, SnareMaterial
+  materials/      Per-ability bespoke materials — ice, lightning, meteor, fire,
+                  beam, snare, and the ones the new schools brought with them
+  vfx/            The shared tech library: 26 modules an ability is configured
+                  against rather than re-implementing. See docs/VFX_API.md.
   particles/      GPU particle system + engine and rate emitters
   postprocessing/ Composer pipeline, grade shader, distortion shader
   shaders/lib/    Shared GLSL: noise library, common helpers
-  ui/             HUD, lil-gui editor, preset manager, styles
+  ui/             HUD + loadout bar, spellbook overlay, lil-gui editor, sigils,
+                  preset manager, styles
   utils/          Maths, colour cache, pooling, disposal, shader patching
   world/          Environment (stage lighting), floor, dust, contact shadows
   archive/        The retired four-element sandbox — see archive/README.md
@@ -391,22 +413,32 @@ first, then the air breaks down over it.
 
 ### Adding another ability
 
-1. Add a settings block in `config/settings.js` and an entry in `ELEMENTS` / `ELEMENT_META`.
-2. Subclass `Ability` and implement `createShaders`, `createParticles`, `onTravel`, `onImpact`,
-   `onFade`.
-3. Register the class in `abilities/AbilityManager.js`.
-4. Add an editor folder in `ui/Editor.js`, and a sigil in `ui/glyphs.js`.
-5. Bind a key in `input/InputManager.js` — it emits `ability` with the 0-based slot index, which
-   `App` maps through `ELEMENTS`.
+1. Add `config/abilities/<id>.js` exporting its settings block and its editor schema, and import
+   it in `config/abilities/index.js`. The schema is the editor folder — there is no `Editor.js`
+   edit any more, and no ability list in `settings.js`.
+2. Subclass `Ability` in `abilities/<school>/<Name>Ability.js` and implement `createShaders`,
+   `createParticles`, `onTravel`, `onImpact`, `onFade`.
+3. Add one descriptor to `abilities/registry.js`. That is the only registration: the manager, the
+   HUD, the spellbook, the presets and the aim controller all derive from it.
+4. Draw a sigil in `ui/glyphs/<school>.js`.
+5. Nothing. It is in the spellbook the moment it is in the registry, and a key is a *binding*
+   rather than a property of the ability: eight slots, `Q E R F V X Z T` (digits `1..8` mirror
+   them), rebound by dragging a card out of the spellbook and saved to `localStorage`. Only the
+   two keyless default slots are named in code, in `DEFAULT_FILL` in `ui/Loadout.js`.
 
 To make it a **far cast** instead of a line cast, add two things and nothing else: `cast:
-CastShape.ZONE` in its `ELEMENT_META` entry, and a `zoneRadius` in its settings block. The circle
+CastShape.ZONE` on its registry descriptor, and a `zoneRadius` in its settings block. The circle
 indicator, the reach ring, the snap-out and the whole targeting loop come for free, and the ability
 reads its centre as `pointAt(1)`.
 
 Everything else — pooling, the travelling front, the local frame, lights, phases, per-ability
-cooldowns, the aim reach and camera framing — is inherited or driven off `ELEMENTS`. The HUD
-builds its slots from that array, so a new ability appears in the bar on its own.
+cooldowns, the aim reach and camera framing — is inherited or driven off the registry.
+
+Then run `npm run check`. It parses your ability for every settings key it reads and fails on one
+that does not exist, simulates the whole cast headlessly, and **mutates your sliders on a
+zero-length frame and fails if nothing observable changes** — the invariant that the whole project
+is built on, enforced rather than trusted. It does not compile GLSL, so put a new material on
+screen once before you believe it.
 
 ### Particles
 
@@ -440,8 +472,11 @@ Per frame:
    samples it for soft intersections, so nothing cuts a hard line into the ground. The crystals sit
    on `LAYER.WORLD`, so mist and glitter fade softly against them.
 2. **Distortion pass** — meshes on the distortion layer write screen-space UV offsets into a second
-   half-res buffer. Nothing writes to it in the current build; the pass is kept because it is the
-   hook a refraction effect would use.
+   half-res buffer, and the composer resamples the frame by them. `vfx/Distortion.js` is what writes
+   there: heat shimmer, 1/r² gravity lensing, travelling shock fronts, vacuum blades and refracting
+   hulls. The layer is counted, so the clear, the draw and the resample are all skipped on frames
+   where nothing is refracting anything — `post.distortionEnabled` turns it off outright and
+   `post.distortionScale` sets the offset buffer's resolution. See `src/vfx/README.md`.
 3. **Composer** — scene → refraction warp → bloom → tone map (ACES) → grade.
 
 The grade pass folds chromatic aberration, lift/gain/contrast/saturation/temperature, vignette,
@@ -571,7 +606,12 @@ piece of it.
   sorting artefacts between overlapping spikes become visible.
 - The eruption front is a straight line on a flat floor. Both assumptions are baked in — the ground
   is a single plane at y = 0, and the aim raycast targets that plane.
-- The distortion pass runs with nothing writing to it. It costs a half-res clear per frame.
+- ~~The distortion pass runs with nothing writing to it.~~ Fixed — `vfx/Distortion.js` writes to it
+  (heat, gravity lensing, shock fronts, vacuum blades, refracting hulls), and the pass now skips its
+  clear, its draw and its resample entirely on frames where nothing on the layer is visible. What
+  remains is that overlapping distorters resolve by coverage rather than by depth: the offset buffer
+  has no depth attachment, so occlusion is a soft rejection against the opaque prepass and other
+  transparents cannot hide a warp.
 - The impact cluster is placed radially around the end point, so at very short cast distances it
   can overlap the band behind it more than it should.
 - The far cast inherits the flat-floor assumption twice over: the circle is drawn on a single quad
