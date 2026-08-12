@@ -414,8 +414,8 @@ first, then the air breaks down over it.
 ### Adding another ability
 
 1. Add `config/abilities/<id>.js` exporting its settings block and its editor schema, and import
-   it in `config/abilities/index.js`. The schema is the editor folder — there is no `Editor.js`
-   edit any more, and no ability list in `settings.js`.
+   it in `config/abilities/index.js`. The schema is the editor folder — there is no `ui/Editor.js`
+   edit any more, and no ability list in `config/settings.js`.
 2. Subclass `Ability` in `abilities/<school>/<Name>Ability.js` and implement `createShaders`,
    `createParticles`, `onTravel`, `onImpact`, `onFade`.
 3. Add one descriptor to `abilities/registry.js`. That is the only registration: the manager, the
@@ -494,10 +494,21 @@ target, blurred twice and projected onto the ground.
 
 ## Editor and presets
 
-Press **G** for the panel. Folders: Presets, Global, Aim indicator, Far-cast circle, Frost Lance,
-Storm Lance, Cinder Fall, Nova Beam, Voltaic Snare, Environment, Post processing, Camera,
-Character. Every folder starts collapsed — there are enough controls here that one open section
-pushes the rest off the screen.
+Press **G** for the panel. Folders: Presets, Global, Aim indicator, Far-cast circle, then **one
+per school** — Frost, Flame, Storm, Stone, Verdant, Void, Arcane, Blood, Aether, Tide, Forge,
+Lumen, Ink, Chrono, Hive — then Environment, Post processing, Camera, Character. Every folder
+starts collapsed, so the panel opens as a list of nineteen rows rather than sixteen thousand
+controls.
+
+An ability's folder is **built the first time it is opened**. Constructing all hundred eagerly
+cost 597 ms and 107,000 DOM nodes at boot, which is a stalled start; on demand it is 7.7 ms and
+1,400 nodes. The **search box** at the top still finds controls in folders that have never been
+opened, because it indexes the schemas rather than the built controllers, and typing filters the
+whole tree at once.
+
+Every ability's folder is generated from the `<id>Schema` export beside its settings block, so a
+new slider appears in the panel the moment it exists — filed if the schema mentions it, and in a
+trailing **More** folder if it does not. A schema is never wrong, only incomplete.
 
 - **Global** multipliers scale everything at once (speed, glow, noise, particles, lights, impact
   intensity, camera shake, time scale…).
@@ -506,6 +517,8 @@ pushes the rest off the screen.
 - **Far-cast circle** (40 controls) — the boundary band, the interior, the ticks, sweep and
   reticle, the reach ring, and the snap-out. Shared by every far cast, so it is filed with the
   targeting rather than with any one ability.
+The four shipped abilities below are a sample of the shape every one of the hundred takes:
+
 - **Frost Lance** (113 controls, 25 of them colours) — the cast, the footprint, the silhouette,
   the crystal itself, the eruption timing, the ice material, the frost on the ground,
   mist/chips/glitter, the impact and the dynamic light.
@@ -573,8 +586,21 @@ Knobs worth knowing about, because they reshape their ability the most:
 - The six dynamic point lights are created at boot and parked at zero intensity rather than added
   and removed — changing the light count forces three to recompile every material.
 - Shadow maps update exactly once per frame even though the scene is rendered several times.
-- `renderer.compileAsync()` runs during boot so the first cast never stutters on shader compile.
-- Pixel ratio is capped at 1.75; the depth and distortion buffers are half resolution.
+- **Abilities are loaded lazily.** A hundred classes are not constructed at boot; the manager
+  imports one the first time its id is selected or cast, and `App` calls `warm(id)` on selection
+  so the class is in memory long before the click. `renderer.compileAsync()` at boot therefore
+  only sees what is in the scene at boot — an ability's shaders compile the first time it is
+  warmed, which is why selection warms rather than the cast.
+- The editor builds an ability's controls on first open, not at boot. See above.
+- `Mirror` (Black Ice, Refraction Cascade) renders the world a second time from a mirrored camera
+  and is the most expensive thing here; it is capped, skipped when nothing is visible, and its
+  target resolution is a slider. `VolumeHull` is fill-rate bound and reads
+  `settings.global.volumeQuality`.
+- Pixel ratio is capped at 1.75; the depth and distortion buffers are half resolution, and the
+  distortion pass skips its clear, draw and resample entirely when nothing is refracting.
+
+The figures below are for the six original abilities and still hold; the new ninety-four were
+built to the same budget of roughly a dozen draw calls for a whole cast.
 
 Measured on a default cast: 32 draw calls idle, ~69 with a full ice field standing and ~49 with a
 bolt in the air, ~1150 live particles. A snare standing with its cage, field and rim burns is ~45
@@ -623,7 +649,10 @@ piece of it.
 
 ---
 
-## Licence
+## License
 
-Code is provided as-is for the purposes of this project. The bundled HDR probe and the character
-FBX retain their original licences.
+**MIT**, © mohamedachrefelouafi — see [`LICENSE`](LICENSE) for the full text. The original
+sandbox, and every technique this project is built on top of, is his work.
+
+The bundled HDR probe and the character FBX are third-party assets and retain their own licences;
+they are not covered by the MIT grant above.
