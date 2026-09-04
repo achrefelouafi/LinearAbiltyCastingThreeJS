@@ -63,6 +63,10 @@ npm run dev
 
 Then open the URL Vite prints (default <http://127.0.0.1:5173>).
 
+Or put it on a public URL without cloning anything, which is handy for sharing the sandbox on a phone or in a thread:
+
+[![Deploy on InstaPods](https://instapods.com/deploy-button.svg)](https://app.instapods.com/dashboard/pods/create?repo=https://github.com/achrefelouafi/LinearAbiltyCastingThreeJS&ref=gh-elemental)
+
 ```bash
 npm run build
 ```
