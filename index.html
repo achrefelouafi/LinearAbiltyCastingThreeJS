@@ -1,15 +1,25 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="no-js">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Elemental Sandbox — Procedural Ice &amp; Lightning VFX Playground</title>
+    <title>Elemental Sandbox | Codrops</title>
+    <meta
+      name="description"
+      content="A skillshot VFX sandbox: six fully procedural abilities with MOBA-style ground aiming, built with Three.js and hand-written GLSL."
+    />
+    <meta name="keywords" content="three.js, webgl, glsl, shader, vfx, particles, skillshot, demo, codrops" />
+    <link rel="icon" type="image/svg+xml" href="https://tympanus.net/favicon/favicon.svg" />
+    <link rel="shortcut icon" href="https://tympanus.net/favicon/favicon.ico" />
     <link rel="preload" as="fetch" href="./models/Idle.fbx" crossorigin />
     <!-- `crossorigin` to match TextureLoader, which requests anonymously. -->
     <link rel="preload" as="image" href="./models/diffuse.png" crossorigin />
     <link rel="stylesheet" href="./src/ui/styles.css" />
+    <link rel="stylesheet" href="./src/ui/frame.css" />
+    <script>document.documentElement.className = 'js';</script>
+    <!--script src="//tympanus.net/codrops/adpacks/analytics.js"></script-->
   </head>
-  <body>
+  <body class="demo-1">
     <canvas id="viewport"></canvas>
 
     <!-- Boot / loading veil -->
@@ -27,9 +37,27 @@
       </div>
     </div>
 
+    <!-- Codrops frame. Styles live in src/ui/frame.css. -->
+    <main>
+      <header class="frame">
+        <h1 class="frame__title">Elemental Sandbox</h1>
+        <nav class="frame__links">
+          <a href="https://tympanus.net/codrops/?p=">Article</a>
+          <a href="https://tympanus.net/codrops/hub/">All demos</a>
+          <a href="https://github.com/achrefelouafi/LinearAbiltyCastingThreeJS">GitHub</a>
+        </nav>
+        <nav class="frame__tags">
+          <a href="https://tympanus.net/codrops/hub/tag/three-js/">#three.js</a>
+          <a href="https://tympanus.net/codrops/hub/tag/webgl/">#webgl</a>
+          <a href="https://tympanus.net/codrops/hub/tag/glsl/">#glsl</a>
+        </nav>
+      </header>
+    </main>
+
     <!-- Heads-up display (populated by src/ui/HUD.js) -->
     <div id="hud" class="hud" aria-live="polite"></div>
 
     <script type="module" src="./src/main.js"></script>
+    <!--script src="https://tympanus.net/codrops/adpacks/cda_sponsor.js"></script-->
   </body>
 </html>

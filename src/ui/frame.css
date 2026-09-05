@@ -1,0 +1,145 @@
+/* ------------------------------------------------------------------ *
+ * Codrops frame
+ *
+ * Lifted from the Codrops HTML template (css/base.css) so the demo ships
+ * the standard header: title, article / hub / GitHub links, tags, and the
+ * `#cdawrap` sponsor slot Codrops drops in at publish time.
+ *
+ * Only the frame rules were copied. The template's `:root` font-size, body
+ * and `.content` rules are deliberately left out — this demo already owns
+ * those in styles.css and the 3D view fills the whole viewport.
+ * ------------------------------------------------------------------ */
+
+:root {
+  --page-padding: 1.5rem;
+}
+
+/*
+ * The template wraps everything in <main>; here it wraps only the frame, so it
+ * must not intercept pointer events over the canvas (below 53em the frame is
+ * in normal flow and <main> takes its height). Links re-enable themselves.
+ */
+body > main {
+  pointer-events: none;
+}
+
+.frame {
+  /*
+   * The template sets `:root { font-size: 12px }` and pays for its 1.5rem
+   * padding out of that. Setting it globally here would resize the whole
+   * existing HUD, so the frame pins the same 18px against its own 12px.
+   */
+  --page-padding: 1.5em;
+  padding: var(--page-padding);
+  display: grid;
+  z-index: 1000;
+  position: relative;
+  gap: 1em;
+  pointer-events: none;
+  justify-items: start;
+  grid-template-columns: 100%;
+  grid-template-areas:
+    'title'
+    'links'
+    'demos'
+    'tags'
+    'sponsor';
+
+  /* The frame sits over a lit 3D scene rather than a flat background. */
+  font-size: 12px;
+  color: #fff;
+  text-shadow: 0 1px 12px rgba(0, 0, 0, 0.65);
+}
+
+.frame #cdawrap {
+  justify-self: start;
+  grid-area: sponsor;
+}
+
+.frame a,
+.frame button {
+  pointer-events: auto;
+}
+
+.frame a {
+  text-decoration: none;
+  color: #fff;
+  outline: none;
+  cursor: pointer;
+}
+
+.frame a:hover {
+  text-decoration: underline;
+  color: #fff;
+}
+
+.frame a:focus {
+  outline: none;
+  background: lightgrey;
+}
+
+.frame a:focus:not(:focus-visible) {
+  background: transparent;
+}
+
+.frame a:focus-visible {
+  outline: 2px solid red;
+  background: transparent;
+}
+
+.frame__title {
+  grid-area: title;
+  font-size: inherit;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+.frame__tags {
+  grid-area: tags;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1em;
+}
+
+.frame__links,
+.frame__demos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1em;
+}
+
+.frame__links {
+  grid-area: links;
+}
+
+.frame__demos {
+  grid-area: demos;
+}
+
+@media screen and (min-width: 53em) {
+  .frame {
+    height: 100%;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    grid-template-columns: auto auto 1fr;
+    grid-template-rows: auto auto;
+    align-content: space-between;
+    grid-template-areas:
+      'title links demos'
+      'tags tags sponsor';
+  }
+
+  .frame__tags {
+    align-self: end;
+  }
+
+  .frame__demos,
+  .frame #cdawrap {
+    justify-self: end;
+    text-align: right;
+    max-width: 300px;
+  }
+}

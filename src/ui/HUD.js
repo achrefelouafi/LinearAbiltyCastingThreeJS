@@ -24,11 +24,6 @@ export class HUD {
     this._armedShown = null;
 
     root.innerHTML = `
-      <div class="hud__panel hud__title">
-        Elemental Sandbox
-        <span data-blurb>Press Q, E, R, F, V or X, aim, click to cast.</span>
-      </div>
-
       <div class="hud__panel hud__stats">
         <div>FPS <b data-stat="fps">—</b></div>
         <div>Particles <b data-stat="particles">0</b></div>

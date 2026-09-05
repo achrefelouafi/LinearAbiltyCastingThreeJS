@@ -2,6 +2,10 @@
 
 A skillshot VFX sandbox built with **Three.js**, **Vite** and hand-written **GLSL**.
 
+[Article on Codrops](https://tympanus.net/codrops/?p=)
+
+[Demo](https://tympanus.net/Development/ElementalSandbox/)
+
 Five abilities and two ways to aim them. Four are **line casts**: press the key to arm, a
 League-of-Legends style arrow appears on the ground and swings with the mouse, click to fire. The
 fifth is a **far cast**: the arrow is replaced by a circle with a deliberately thick boundary that
@@ -583,7 +587,14 @@ piece of it.
 
 ---
 
+## Credits
+
+- [Three.js](https://threejs.org/) and [lil-gui](https://lil-gui.georgealways.com/)
+- Character rig and the four animation clips: [Mixamo](https://www.mixamo.com/)
+- `spruit_sunrise.hdr` environment probe: [Poly Haven](https://polyhaven.com/a/spruit_sunrise) (CC0)
+
+---
+
 ## Licence
 
-Code is provided as-is for the purposes of this project. The bundled HDR probe and the character
-FBX retain their original licences.
+[MIT](LICENSE). The bundled HDR probe and the character FBX retain their original licences.

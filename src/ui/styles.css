@@ -48,7 +48,7 @@ body {
 .loader {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: 10000;
   display: grid;
   place-items: center;
   background: radial-gradient(120% 120% at 50% 30%, #16202c 0%, #05070a 70%);
@@ -292,7 +292,7 @@ body {
 
 .hud__help {
   left: 22px;
-  bottom: 26px;
+  bottom: 62px;
   max-width: 260px;
   color: var(--ui-text-dim);
   transition: opacity 0.3s ease;
@@ -332,24 +332,6 @@ body {
   float: right;
   color: var(--ui-text);
   font-weight: 600;
-}
-
-.hud__title {
-  left: 22px;
-  top: 22px;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.hud__title span {
-  display: block;
-  margin-top: 2px;
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  color: var(--ui-text-dim);
-  text-transform: none;
 }
 
 .hud__toast {
