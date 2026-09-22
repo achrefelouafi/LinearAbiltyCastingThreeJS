@@ -8,9 +8,18 @@
  */
 export function patchOnBeforeCompile(material, fn) {
   const previous = material.onBeforeCompile;
+  const previousKey = material.customProgramCacheKey?.bind(material);
+  const injectionKey = Function.prototype.toString.call(fn);
   material.onBeforeCompile = function (shader, renderer) {
     if (previous) previous.call(this, shader, renderer);
     fn.call(this, shader, renderer);
+  };
+  // three.js keys the program cache on onBeforeCompile.toString() by default.
+  // Nested wrappers are identically worded, so the closed-over injection never
+  // appears in that string and every patched material would share one program.
+  material.customProgramCacheKey = function () {
+    const prior = previousKey ? previousKey.call(this) : '';
+    return `${prior}\n${injectionKey}`;
   };
   return material;
 }
