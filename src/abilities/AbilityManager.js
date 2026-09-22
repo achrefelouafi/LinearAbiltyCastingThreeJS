@@ -17,7 +17,7 @@ const ABILITY_TYPES = {
   glacier: GlacierAbility
 };
 
-const MAX_CONCURRENT = 4;
+const MAX_CONCURRENT = 6;
 
 /**
  * Spawns, updates and recycles abilities.
