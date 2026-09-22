@@ -2,9 +2,9 @@
 
 A skillshot VFX sandbox built with **Three.js**, **Vite** and hand-written **GLSL**.
 
-Five abilities and two ways to aim them. Four are **line casts**: press the key to arm, a
-League-of-Legends style arrow appears on the ground and swings with the mouse, click to fire. The
-fifth is a **far cast**: the arrow is replaced by a circle with a deliberately thick boundary that
+Six abilities and two ways to aim them. Four are **line casts**: press the key to arm, a
+League-of-Legends style arrow appears on the ground and swings with the mouse, click to fire. Two
+are **far casts**: the arrow is replaced by a circle with a deliberately thick boundary that
 follows the cursor and answers the only question a ground-targeted AoE has to answer before you
 commit — how much space is this going to take.
 
@@ -28,11 +28,17 @@ spiralling around it and shock discs racing down it. It *holds* there, burning i
 throwing spray back up the beam, before collapsing to a thread and blinking out. The only cast in
 the sandbox that is still happening a second after it landed.
 
-**V — Voltaic Snare.** The far cast. A leash of current is whipped out across the floor, and where
+**V — Voltaic Snare.** The first far cast. A leash of current is whipped out across the floor, and where
 it lands the ring snaps open past its own radius and pulls back onto it: a violet column tears up
 out of the middle, tendrils crawl outward to the boundary, arcs run around the rim and the whole
 disc burns. It holds there re-striking and hauling the air up into the pillar, then collapses to a
 thread. The circle you measured out before the click is exactly the circle you get.
+
+**X — Glacial Crown.** The second far cast, and the one that comes out of the floor. A cold front
+races along the floor to the aimed point, the disc freezes outward to the boundary the indicator
+drew, and a wall of crystal tears up around it — a ring of blades leaning outward with a skirt of
+wreckage at their feet. The middle stays open. It stands, glints, breathes cold off its rim, then
+shatters plate by plate and sinks back into the floor.
 
 Everything you can see is generated. There are no textures, no sprite sheets and no meshes on
 disk except the character: the crystals are procedural geometry, the bolt is a strip of ribbon
@@ -81,7 +87,7 @@ Six binary assets are served from `public/` and loaded automatically at boot:
 | `public/models/diffuse.png` | The character's colour map |
 | `public/models/cast1.fbx` | Cast animation |
 | `public/models/cast2.fbx` | Cast animation |
-| `public/models/cast3.fbx` | Cast animation — the default for Frost Lance, Root Snare and Glacier Crown |
+| `public/models/cast3.fbx` | Cast animation — the default for Frost Lance and Glacial Crown |
 | `public/hdri/spruit_sunrise.hdr` | HDR probe used for image-based lighting and crystal reflections |
 
 All four FBX files are Mixamo exports of the same rig, each carrying a skinned mesh plus one
@@ -95,8 +101,8 @@ the imported materials are converted to PBR — an FBX that *does* carry an embe
 own, since that map is authored against its own UVs.
 
 Every ability picks the clip it throws — `castAnim` in its settings block, a dropdown under **The
-cast** in its editor folder. Out of the box slots 1, 5 and 6 — Frost Lance, Root Snare and Glacier
-Crown — throw `cast3`, and the other three throw `cast1`. The clip is a one-shot laid over
+cast** in its editor folder. Out of the box slots 1 and 6 — Frost Lance and Glacial Crown — throw
+`cast3`, slots 2 and 5 throw `cast2`, and the other two throw `cast1`. The clip is a one-shot laid over
 the looping idle, with `character.castBlendIn` / `castBlendOut` as the two edges of that overlap.
 
 The HDR is loaded as image-based lighting and as the reflection source for the ice — it is never
@@ -112,7 +118,8 @@ shown as a visible sky. The stage keeps its flat dark backdrop.
 | **E** (or **2**) | Arm Storm Lance — press again to put it away |
 | **R** (or **3**) | Arm Cinder Fall — press again to put it away |
 | **F** (or **4**) | Arm Nova Beam — press again to put it away |
-| **V** (or **5**) | Arm Voltaic Snare — the far cast, aimed with a circle |
+| **V** (or **5**) | Arm Voltaic Snare — the first far cast, aimed with a circle |
+| **X** (or **6**) | Arm Glacial Crown — the second far cast, aimed with a circle |
 | **Move the mouse** | Swing the aim arrow, or move the far-cast circle |
 | **Left click** | Cast along the arrow, or drop the circle where it is |
 | **Esc** / **right click** | Cancel an armed cast |
@@ -136,7 +143,7 @@ spending one slot never locks the other out.
 ```
 src/
   abilities/      Ability base class (the travelling front), IceAbility, ThunderAbility,
-                  MeteorAbility, BeamAbility, SnareAbility, pooling manager
+                  MeteorAbility, BeamAbility, SnareAbility, GlacierAbility, pooling manager
   animation/      FBX character loading, AnimationMixer, the per-ability cast clips,
                   the procedural cast lunge
   assets/         Procedural crystal and asteroid geometry, the bolt ribbon strip,
