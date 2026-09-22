@@ -113,6 +113,10 @@ dist
 # Docusaurus cache and generated files
 .docusaurus
 
+# Firebase local state and logs
+.firebase/
+firebase-debug.log*
+
 # Serverless directories
 .serverless/
 

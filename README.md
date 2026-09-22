@@ -102,6 +102,22 @@ the looping idle, with `character.castBlendIn` / `castBlendOut` as the two edges
 The HDR is loaded as image-based lighting and as the reflection source for the ice — it is never
 shown as a visible sky. The stage keeps its flat dark backdrop.
 
+## Firebase Hosting
+
+This project deploys as a static Vite build, so Firebase Hosting serves the contents of `dist/`.
+
+1. Create a Firebase project in the Firebase Console.
+2. Replace `YOUR_FIREBASE_PROJECT_ID` in [.firebaserc](.firebaserc) and [.github/workflows/firebase-hosting.yml](.github/workflows/firebase-hosting.yml) with your real project id.
+3. In GitHub repository settings, add a secret named `FIREBASE_SERVICE_ACCOUNT_CASTINGTHREEJS` containing the Firebase service account JSON.
+4. Push to `main`. The workflow installs dependencies, runs `npm run build`, and deploys the build output to Firebase Hosting.
+
+For local verification, run:
+
+```bash
+npm run build
+firebase deploy --only hosting
+```
+
 ---
 
 ## Controls
